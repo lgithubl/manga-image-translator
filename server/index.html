@@ -132,6 +132,31 @@
             </div>
           </div>
 
+          <!-- Codex OAuth -->
+          <div class="flex flex-wrap items-center gap-2 text-sm" title="Codex OAuth for custom_openai">
+            <button
+              class="px-3 py-1 rounded bg-gray-800 text-white hover:bg-gray-700 disabled:bg-gray-400"
+              type="button"
+              :disabled="codexAuthLoading"
+              @click="startCodexAuth"
+            >
+              {{ codexAuthStatus.authenticated ? 'Refresh Codex Login' : 'Login Codex' }}
+            </button>
+            <button
+              class="px-3 py-1 rounded border border-gray-300 hover:bg-gray-50"
+              type="button"
+              @click="useCodexTranslator"
+            >
+              Use Codex
+            </button>
+            <span
+              class="text-xs"
+              :class="codexAuthStatus.authenticated ? 'text-green-700' : 'text-gray-500'"
+            >
+              {{ codexAuthStatus.authenticated ? 'Codex ready' : 'Codex not logged in' }}
+            </span>
+          </div>
+
           <!-- Target Language -->
           <div class="flex items-center gap-1" title="Target language">
             <i class="iconify text-gray-600" data-icon="carbon:language"></i>
@@ -174,6 +199,21 @@
               ></i>
             </div>
           </div>
+        </div>
+
+        <div
+          v-if="codexDevice.user_code || codexAuthMessage"
+          class="border border-gray-200 rounded-md bg-gray-50 p-3 text-sm space-y-2"
+        >
+          <div v-if="codexDevice.user_code" class="flex flex-wrap items-center gap-3">
+            <span>Open</span>
+            <a class="text-blue-600 underline" :href="codexDevice.verification_uri" target="_blank">
+              {{ codexDevice.verification_uri }}
+            </a>
+            <span>and enter</span>
+            <span class="font-mono text-lg font-semibold tracking-widest">{{ codexDevice.user_code }}</span>
+          </div>
+          <div class="text-gray-600">{{ codexAuthMessage }}</div>
         </div>
 
         <!-- オプション（2段目） -->
@@ -748,6 +788,7 @@
         onmounted() {
           window.addEventListener("paste", this.onpaste);
           this.loadSettings();
+          this.loadCodexAuthStatus();
           this.loadFinishedImages();
           // Sync gallery with results folder on page load
           setTimeout(() => {
@@ -816,6 +857,15 @@
         textDetector: "default",
         renderTextDirection: "auto",
         translator: "youdao",
+        codexAuthLoading: false,
+        codexAuthPollTimer: null,
+        codexAuthMessage: "",
+        codexDevice: {},
+        codexAuthStatus: {
+          authenticated: false,
+          auth_path: "",
+          expires_in: null,
+        },
         validTranslators: [
           "youdao",
           "baidu",
@@ -899,6 +949,79 @@
             localStorage.setItem('manga-translator-settings', JSON.stringify(settings));
           } catch (error) {
             console.warn('Failed to save settings:', error);
+          }
+        },
+
+        async loadCodexAuthStatus() {
+          try {
+            const response = await fetch(`${BASE_URI}codex-auth/status`);
+            if (response.ok) {
+              this.codexAuthStatus = await response.json();
+            }
+          } catch (error) {
+            console.warn('Failed to load Codex auth status:', error);
+          }
+        },
+
+        useCodexTranslator() {
+          this.translator = "custom_openai";
+          this.saveSettings();
+          this.loadCodexAuthStatus();
+          this.codexAuthMessage = this.codexAuthStatus.authenticated
+            ? "custom_openai is now routed through the built-in Codex relay."
+            : "custom_openai selected. Login Codex before translating.";
+        },
+
+        async startCodexAuth() {
+          this.codexAuthLoading = true;
+          this.codexAuthMessage = "Requesting Codex device code...";
+          this.codexDevice = {};
+          if (this.codexAuthPollTimer) {
+            clearInterval(this.codexAuthPollTimer);
+            this.codexAuthPollTimer = null;
+          }
+          try {
+            const response = await fetch(`${BASE_URI}codex-auth/start`, { method: "POST" });
+            if (!response.ok) {
+              throw new Error(await response.text());
+            }
+            this.codexDevice = await response.json();
+            this.codexAuthMessage = "Waiting for browser login to finish...";
+            const poll = async () => {
+              try {
+                const pollResponse = await fetch(`${BASE_URI}codex-auth/poll`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    device_auth_id: this.codexDevice.device_auth_id,
+                    user_code: this.codexDevice.user_code,
+                  }),
+                });
+                if (!pollResponse.ok) {
+                  throw new Error(await pollResponse.text());
+                }
+                const data = await pollResponse.json();
+                if (data.authenticated) {
+                  clearInterval(this.codexAuthPollTimer);
+                  this.codexAuthPollTimer = null;
+                  this.codexAuthLoading = false;
+                  this.codexDevice = {};
+                  this.codexAuthStatus = data;
+                  this.codexAuthMessage = "Codex login completed. You can translate with custom_openai now.";
+                  this.useCodexTranslator();
+                }
+              } catch (error) {
+                clearInterval(this.codexAuthPollTimer);
+                this.codexAuthPollTimer = null;
+                this.codexAuthLoading = false;
+                this.codexAuthMessage = `Codex login failed: ${error.message}`;
+              }
+            };
+            this.codexAuthPollTimer = setInterval(poll, (this.codexDevice.interval || 5) * 1000);
+            setTimeout(poll, 1000);
+          } catch (error) {
+            this.codexAuthLoading = false;
+            this.codexAuthMessage = `Codex login failed: ${error.message}`;
           }
         },
 

@@ -22,8 +22,10 @@ from server.instance import ExecutorInstance, executor_instances
 from server.myqueue import task_queue
 from server.request_extraction import get_ctx, while_streaming, TranslateRequest, BatchTranslateRequest, get_batch_ctx
 from server.to_json import to_translation, TranslationResponse
+from server.codex_oauth import router as codex_oauth_router
 
 app = FastAPI()
+app.include_router(codex_oauth_router)
 nonce = None
 
 BASE_DIR = Path(__file__).resolve().parent
