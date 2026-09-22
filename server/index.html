@@ -135,15 +135,15 @@
           <!-- Codex OAuth -->
           <div class="flex flex-wrap items-center gap-2 text-sm" title="Codex OAuth for custom_openai">
             <button
-              class="px-3 py-1 rounded bg-gray-800 text-white hover:bg-gray-700 disabled:bg-gray-400"
+              style="display:inline-block;padding:4px 12px;border-radius:4px;background:#1f2937;color:white;border:1px solid #1f2937;"
               type="button"
               :disabled="codexAuthLoading"
               @click="startCodexAuth"
             >
-              {{ codexAuthStatus.authenticated ? 'Refresh Codex Login' : 'Login Codex' }}
+              Login Codex
             </button>
             <button
-              class="px-3 py-1 rounded border border-gray-300 hover:bg-gray-50"
+              style="display:inline-block;padding:4px 12px;border-radius:4px;background:white;color:#111827;border:1px solid #d1d5db;"
               type="button"
               @click="useCodexTranslator"
             >
