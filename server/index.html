@@ -336,6 +336,32 @@
           </div>
 
           <!-- Render font -->
+          <div class="flex items-center gap-1" title="Render preset">
+            <i class="iconify text-gray-600" data-icon="carbon:template"></i>
+            <div class="relative">
+              <select
+                class="appearance-none bg-transparent border-b border-gray-300 pl-2 pr-7 py-1 outline-none focus:border-blue-500 max-w-44"
+                v-model="renderPreset"
+              >
+                <option v-for="preset in renderPresets" :value="preset.key" :key="preset.key">
+                  {{ preset.label }}
+                </option>
+              </select>
+              <i
+                class="iconify absolute top-1 right-1 text-gray-500 pointer-events-none"
+                data-icon="carbon:chevron-down"
+              ></i>
+            </div>
+            <button
+              type="button"
+              class="px-2 py-1 text-xs bg-gray-800 text-white rounded hover:bg-gray-900 transition-colors"
+              @click="applyRenderPreset"
+            >
+              Apply
+            </button>
+          </div>
+
+          <!-- Render font -->
           <div class="flex items-center gap-1" title="Render font">
             <i class="iconify text-gray-600" data-icon="carbon:text-font"></i>
             <div class="relative">
@@ -737,6 +763,13 @@
               Translation Results ({{ finishedImages.length }})
             </h3>
             <div class="flex space-x-2">
+              <input
+                v-if="finishedImages.length > 0"
+                v-model="downloadZipName"
+                class="px-2 py-1 text-sm border border-gray-300 rounded-md outline-none focus:border-blue-500 max-w-44"
+                placeholder="zip name"
+                title="ZIP filename"
+              />
               <button @click="toggleGallery" 
                       class="px-3 py-1 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors">
                 {{ showGallery ? 'Hide' : 'Show' }} Gallery
@@ -962,12 +995,21 @@
         detectionResolution: "1536",
         textDetector: "default",
         renderTextDirection: "auto",
+        renderPreset: "auto",
+        renderPresets: [
+          { key: "auto", label: "Auto" },
+          { key: "chinese", label: "Chinese Manga" },
+          { key: "english", label: "English Comic" },
+          { key: "small", label: "Small Bubble" },
+          { key: "caption", label: "Caption Box" },
+        ],
         availableFonts: [],
         selectedFontPath: "",
         fontSize: "",
         fontSizeOffset: 0,
         fontColorPicker: "#000000",
         disableFontBorder: false,
+        downloadZipName: "",
         translator: "youdao",
         codexAuthLoading: false,
         codexAuthPollTimer: null,
@@ -1042,11 +1084,13 @@
               if (settings.maskDilationOffset) this.maskDilationOffset = settings.maskDilationOffset;
               if (settings.inpainter) this.inpainter = settings.inpainter;
               if (settings.codexModel) this.codexModel = settings.codexModel;
+              if (settings.renderPreset) this.renderPreset = settings.renderPreset;
               if (settings.selectedFontPath) this.selectedFontPath = settings.selectedFontPath;
               if (settings.fontSize !== undefined) this.fontSize = settings.fontSize;
               if (settings.fontSizeOffset !== undefined) this.fontSizeOffset = settings.fontSizeOffset;
               if (settings.fontColorPicker) this.fontColorPicker = settings.fontColorPicker;
               if (settings.disableFontBorder !== undefined) this.disableFontBorder = settings.disableFontBorder;
+              if (settings.downloadZipName) this.downloadZipName = settings.downloadZipName;
             }
           } catch (error) {
             console.warn('Failed to load settings:', error);
@@ -1067,11 +1111,13 @@
               maskDilationOffset: this.maskDilationOffset,
               inpainter: this.inpainter,
               codexModel: this.codexModel,
+              renderPreset: this.renderPreset,
               selectedFontPath: this.selectedFontPath,
               fontSize: this.fontSize,
               fontSizeOffset: this.fontSizeOffset,
               fontColorPicker: this.fontColorPicker,
               disableFontBorder: this.disableFontBorder,
+              downloadZipName: this.downloadZipName,
             };
             localStorage.setItem('manga-translator-settings', JSON.stringify(settings));
           } catch (error) {
@@ -1092,6 +1138,67 @@
 
         onFontColorPickerChange() {
           this.onSettingChange();
+        },
+
+        fontPathByName(name) {
+          const font = this.availableFonts.find((item) => item.name === name);
+          return font ? font.path : "";
+        },
+
+        async applyRenderPreset() {
+          if (!this.availableFonts.length) {
+            await this.loadFonts();
+          }
+          const presets = {
+            auto: {
+              font: "NotoSansMonoCJK-VF.ttf.ttc",
+              fontSize: "",
+              fontSizeOffset: 0,
+              fontColorPicker: "#000000",
+              disableFontBorder: false,
+              renderTextDirection: "auto",
+            },
+            chinese: {
+              font: "NotoSansMonoCJK-VF.ttf.ttc",
+              fontSize: "",
+              fontSizeOffset: 2,
+              fontColorPicker: "#000000",
+              disableFontBorder: false,
+              renderTextDirection: "auto",
+            },
+            english: {
+              font: "anime_ace.ttf",
+              fontSize: "",
+              fontSizeOffset: 0,
+              fontColorPicker: "#000000",
+              disableFontBorder: false,
+              renderTextDirection: "horizontal",
+            },
+            small: {
+              font: "NotoSansMonoCJK-VF.ttf.ttc",
+              fontSize: "",
+              fontSizeOffset: -3,
+              fontColorPicker: "#000000",
+              disableFontBorder: false,
+              renderTextDirection: "auto",
+            },
+            caption: {
+              font: "NotoSansMonoCJK-VF.ttf.ttc",
+              fontSize: "",
+              fontSizeOffset: -2,
+              fontColorPicker: "#000000",
+              disableFontBorder: true,
+              renderTextDirection: "horizontal",
+            },
+          };
+          const preset = presets[this.renderPreset] || presets.auto;
+          this.selectedFontPath = this.fontPathByName(preset.font) || this.selectedFontPath;
+          this.fontSize = preset.fontSize;
+          this.fontSizeOffset = preset.fontSizeOffset;
+          this.fontColorPicker = preset.fontColorPicker;
+          this.disableFontBorder = preset.disableFontBorder;
+          this.renderTextDirection = preset.renderTextDirection;
+          this.saveSettings();
         },
 
         async loadCodexAuthStatus() {
@@ -1963,8 +2070,17 @@
       link.remove();
     },
 
+    zipDownloadName() {
+      const raw = (this.downloadZipName || "").trim();
+      if (!raw) return "manga-translator-results.zip";
+      const cleaned = raw.replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, " ").trim();
+      const base = cleaned || "manga-translator-results";
+      return base.toLowerCase().endsWith(".zip") ? base : `${base}.zip`;
+    },
+
     downloadAllResults() {
-      this.triggerDownload(`${BASE_URI}results/download.zip`, 'manga-translator-results.zip');
+      this.saveSettings();
+      this.triggerDownload(`${BASE_URI}results/download.zip`, this.zipDownloadName());
     },
 
     downloadImage(image) {
