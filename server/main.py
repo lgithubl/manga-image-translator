@@ -49,6 +49,7 @@ async def register_instance(instance: ExecutorInstance, req: Request, req_nonce:
     if req_nonce != nonce:
         raise HTTPException(401, detail="Invalid nonce")
     instance.ip = req.client.host
+    instance.nonce = nonce
     executor_instances.register(instance)
 
 def transform_to_image(ctx):
@@ -269,7 +270,7 @@ def start_translator_client_proc(host: str, port: int, nonce: str, params: Names
     base_path = os.path.dirname(os.path.abspath(__file__))
     parent = os.path.dirname(base_path)
     proc = subprocess.Popen(cmds, cwd=parent)
-    executor_instances.register(ExecutorInstance(ip=host, port=port))
+    executor_instances.register(ExecutorInstance(ip=host, port=port, nonce=nonce))
 
     def handle_exit_signals(signal, frame):
         proc.terminate()
