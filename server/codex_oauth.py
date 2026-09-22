@@ -15,7 +15,15 @@ CODEX_OAUTH_CLIENT_ID = os.getenv("CODEX_OAUTH_CLIENT_ID", "app_EMoamEEZ73f0CkXa
 CODEX_ISSUER = "https://auth.openai.com"
 CODEX_OAUTH_TOKEN_URL = f"{CODEX_ISSUER}/oauth/token"
 CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120
-CODEX_DEFAULT_MODEL = os.getenv("CODEX_MODEL", os.getenv("CUSTOM_OPENAI_MODEL", "gpt-5.4"))
+CODEX_DEFAULT_MODEL = os.getenv("CODEX_MODEL", os.getenv("CUSTOM_OPENAI_MODEL", "auto"))
+CODEX_MODEL_PREFERENCES = [
+    "gpt-5.3-codex",
+    "gpt-5.2-codex",
+    "gpt-5.1-codex",
+    "gpt-5-codex",
+    "gpt-5",
+    "gpt-4.1",
+]
 CODEX_AUTH_PATH = Path(os.getenv("CODEX_AUTH_FILE", os.path.expanduser("~/.codex/auth.json"))).expanduser()
 CODEX_REQUEST_TIMEOUT = float(os.getenv("CODEX_REQUEST_TIMEOUT", "120"))
 
@@ -169,6 +177,76 @@ def _chat_to_responses_payload(body: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _extract_model_ids(data: Any) -> List[str]:
+    ids: List[str] = []
+
+    def add(value: Any) -> None:
+        if isinstance(value, str) and value and value not in ids:
+            ids.append(value)
+
+    def walk(value: Any) -> None:
+        if isinstance(value, str):
+            add(value)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+        elif isinstance(value, dict):
+            for key in ("id", "name", "slug", "model", "model_slug"):
+                add(value.get(key))
+            for key in ("data", "models", "items", "available_models"):
+                if key in value:
+                    walk(value[key])
+
+    walk(data)
+    return ids
+
+
+async def _get_available_models(token: str) -> List[str]:
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(
+            f"{CODEX_BASE_URL}/models?client_version=1.0.0",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        )
+    if resp.status_code >= 400:
+        raise HTTPException(resp.status_code, detail=resp.text[:1000])
+    try:
+        data = resp.json()
+    except Exception:
+        data = []
+    return _extract_model_ids(data)
+
+
+def _pick_preferred_model(models: List[str]) -> Optional[str]:
+    if not models:
+        return None
+    model_set = set(models)
+    for preferred in CODEX_MODEL_PREFERENCES:
+        if preferred in model_set:
+            return preferred
+    for model in models:
+        if "codex" in model:
+            return model
+    return models[0]
+
+
+async def _resolve_model(token: str, requested: Any) -> str:
+    requested_model = str(requested or "").strip()
+    models = await _get_available_models(token)
+    if requested_model and requested_model.lower() != "auto" and requested_model in set(models):
+        return requested_model
+    fallback = _pick_preferred_model(models)
+    if fallback:
+        return fallback
+    if requested_model and requested_model.lower() != "auto":
+        return requested_model
+    raise HTTPException(400, detail="No Codex models are available for this account.")
+
+
+def _is_unsupported_model_error(resp: httpx.Response) -> bool:
+    text = resp.text.lower()
+    return resp.status_code == 400 and "model" in text and "not supported" in text
+
+
 def _drop_none(data: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in data.items() if v is not None}
 
@@ -189,7 +267,7 @@ def _extract_text(data: Dict[str, Any]) -> str:
 
 
 def _chat_response(body: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
-    model = body.get("model") or data.get("model") or CODEX_DEFAULT_MODEL
+    model = data.get("model") or body.get("model") or CODEX_DEFAULT_MODEL
     content = _extract_text(data)
     usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
     return {
@@ -297,24 +375,12 @@ async def codex_auth_logout() -> Dict[str, Any]:
 @router.get("/v1/models")
 async def codex_models() -> Dict[str, Any]:
     token = await _get_access_token()
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(
-            f"{CODEX_BASE_URL}/models?client_version=1.0.0",
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-        )
-    if resp.status_code >= 400:
-        raise HTTPException(resp.status_code, detail=resp.text[:1000])
-    try:
-        data = resp.json()
-    except Exception:
-        data = []
-    items = data if isinstance(data, list) else data.get("data", []) if isinstance(data, dict) else []
+    models = await _get_available_models(token)
     return {
         "object": "list",
         "data": [
-            {"id": item if isinstance(item, str) else item.get("id") or item.get("name"), "object": "model", "owned_by": "codex"}
-            for item in items
-            if (isinstance(item, str) or isinstance(item, dict))
+            {"id": model, "object": "model", "owned_by": "codex"}
+            for model in models
         ],
     }
 
@@ -324,6 +390,7 @@ async def codex_chat_completions(request: Request):
     body = await request.json()
     token = await _get_access_token()
     payload = _drop_none(_chat_to_responses_payload(body))
+    payload["model"] = await _resolve_model(token, payload.get("model"))
 
     headers = {
         "Authorization": f"Bearer {token}",
@@ -354,7 +421,7 @@ async def codex_chat_completions(request: Request):
                                 "id": f"chatcmpl-{int(time.time())}",
                                 "object": "chat.completion.chunk",
                                 "created": int(time.time()),
-                                "model": body.get("model") or CODEX_DEFAULT_MODEL,
+                                "model": payload.get("model") or CODEX_DEFAULT_MODEL,
                                 "choices": [{"index": 0, "delta": {"content": event.get("delta", "")}, "finish_reason": None}],
                             }
                             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
@@ -363,6 +430,12 @@ async def codex_chat_completions(request: Request):
 
     async with httpx.AsyncClient(timeout=CODEX_REQUEST_TIMEOUT) as client:
         resp = await client.post(f"{CODEX_BASE_URL}/responses", headers=headers, json=payload)
+        if _is_unsupported_model_error(resp):
+            models = await _get_available_models(token)
+            fallback = _pick_preferred_model([model for model in models if model != payload.get("model")])
+            if fallback:
+                payload["model"] = fallback
+                resp = await client.post(f"{CODEX_BASE_URL}/responses", headers=headers, json=payload)
     if resp.status_code >= 400:
         raise HTTPException(resp.status_code, detail=resp.text[:1000])
-    return _chat_response(body, resp.json())
+    return _chat_response(payload, resp.json())

@@ -153,10 +153,10 @@
               <select
                 class="appearance-none bg-transparent border-b border-gray-300 pl-2 pr-7 py-1 outline-none focus:border-blue-500 max-w-56"
                 v-model="codexModel"
-                :disabled="codexModelsLoading || !codexModels.length"
+                :disabled="codexModelsLoading"
                 @change="onSettingChange"
               >
-                <option value="">{{ codexModelsLoading ? 'Loading models...' : 'Select model' }}</option>
+                <option value="auto">{{ codexModelsLoading ? 'Loading models...' : 'Auto' }}</option>
                 <option v-for="model in codexModels" :value="model" :key="model">
                   {{ model }}
                 </option>
@@ -879,7 +879,7 @@
         codexAuthMessage: "",
         codexDevice: {},
         codexModels: [],
-        codexModel: "",
+        codexModel: "auto",
         codexModelsLoading: false,
         codexAuthStatus: {
           authenticated: false,
@@ -1000,11 +1000,11 @@
               .map((item) => item && item.id)
               .filter((id) => typeof id === "string" && id.length > 0);
             this.codexModels = [...new Set(models)];
-            if (!this.codexModel && this.codexModels.length) {
+            if ((!this.codexModel || this.codexModel === "auto") && this.codexModels.length) {
               this.codexModel = this.codexModels[0];
               this.saveSettings();
-            } else if (this.codexModel && !this.codexModels.includes(this.codexModel)) {
-              this.codexModel = this.codexModels[0] || "";
+            } else if (this.codexModel && this.codexModel !== "auto" && !this.codexModels.includes(this.codexModel)) {
+              this.codexModel = this.codexModels[0] || "auto";
               this.saveSettings();
             }
           } catch (error) {

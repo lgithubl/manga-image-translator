@@ -6,7 +6,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     CUSTOM_OPENAI_API_BASE=http://127.0.0.1:8000/v1 \
     CUSTOM_OPENAI_API_KEY=codex-oauth \
-    CUSTOM_OPENAI_MODEL=gpt-5.4 \
+    CUSTOM_OPENAI_MODEL=auto \
     CODEX_AUTH_FILE=/root/.codex/auth.json
 
 WORKDIR /app
