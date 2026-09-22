@@ -229,17 +229,30 @@ def _pick_preferred_model(models: List[str]) -> Optional[str]:
     return models[0]
 
 
+def _model_candidates(models: List[str], current: Any = None) -> List[str]:
+    if isinstance(current, (set, list, tuple)):
+        excluded = {str(item).strip() for item in current}
+    else:
+        excluded = {str(current or "").strip()}
+    candidates: List[str] = []
+    preferred = _pick_preferred_model(models)
+    for model in [preferred, *models, *CODEX_MODEL_PREFERENCES]:
+        if model and model not in excluded and model not in candidates:
+            candidates.append(model)
+    return candidates
+
+
 async def _resolve_model(token: str, requested: Any) -> str:
     requested_model = str(requested or "").strip()
     models = await _get_available_models(token)
     if requested_model and requested_model.lower() != "auto" and requested_model in set(models):
         return requested_model
-    fallback = _pick_preferred_model(models)
-    if fallback:
-        return fallback
-    if requested_model and requested_model.lower() != "auto":
+    candidates = _model_candidates(models, requested_model)
+    if candidates:
+        return candidates[0]
+    if requested_model and requested_model.lower() != "auto" and requested_model != "gpt-5.4":
         return requested_model
-    raise HTTPException(400, detail="No Codex models are available for this account.")
+    return CODEX_MODEL_PREFERENCES[0]
 
 
 def _is_unsupported_model_error(resp: httpx.Response) -> bool:
@@ -430,12 +443,15 @@ async def codex_chat_completions(request: Request):
 
     async with httpx.AsyncClient(timeout=CODEX_REQUEST_TIMEOUT) as client:
         resp = await client.post(f"{CODEX_BASE_URL}/responses", headers=headers, json=payload)
-        if _is_unsupported_model_error(resp):
+        tried_models = {str(payload.get("model") or "")}
+        while _is_unsupported_model_error(resp):
             models = await _get_available_models(token)
-            fallback = _pick_preferred_model([model for model in models if model != payload.get("model")])
-            if fallback:
-                payload["model"] = fallback
-                resp = await client.post(f"{CODEX_BASE_URL}/responses", headers=headers, json=payload)
+            candidates = _model_candidates(models, tried_models)
+            if not candidates:
+                break
+            payload["model"] = candidates[0]
+            tried_models.add(str(payload["model"]))
+            resp = await client.post(f"{CODEX_BASE_URL}/responses", headers=headers, json=payload)
     if resp.status_code >= 400:
         raise HTTPException(resp.status_code, detail=resp.text[:1000])
     return _chat_response(payload, resp.json())
