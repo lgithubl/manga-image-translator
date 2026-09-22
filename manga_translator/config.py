@@ -322,6 +322,8 @@ class OcrConfig(BaseModel):
 
 class Config(BaseModel):
     # General
+    font_path: Optional[str] = None
+    """Font file path to use for rendering."""
     filter_text: Optional[str] = None
     """Filter regions by their text with a regex. Example usage: '.*badtext.*'"""
     render: RenderConfig = RenderConfig()

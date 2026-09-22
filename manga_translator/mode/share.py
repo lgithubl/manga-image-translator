@@ -126,6 +126,11 @@ class MangaShare:
             raise HTTPException(status_code=404, detail="Method not found")
         return method
 
+    def apply_task_config(self, attr: dict):
+        config = attr.get('config')
+        if config:
+            self.manga.font_path = getattr(config, 'font_path', None)
+
     async def listen(self, translation_params: dict = None):
         app = FastAPI()
 
@@ -141,6 +146,7 @@ class MangaShare:
             self.check_lock()
             method = self.get_fn(method_name)
             attr = restricted_loads(await request.body())
+            self.apply_task_config(attr)
             try:
                 if asyncio.iscoroutinefunction(method):
                     result = await method(**attr)
@@ -159,6 +165,7 @@ class MangaShare:
             self.check_lock()
             method = self.get_fn(method_name)
             attr = restricted_loads(await request.body())
+            self.apply_task_config(attr)
 
             # 根据端点类型决定是否使用占位符优化
             config = attr.get('config')

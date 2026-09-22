@@ -5,6 +5,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import zipfile
 from argparse import Namespace
 import asyncio
 
@@ -30,6 +31,7 @@ nonce = None
 
 BASE_DIR = Path(__file__).resolve().parent
 RESULT_ROOT = (BASE_DIR.parent / "result").resolve()
+FONT_ROOT = (BASE_DIR.parent / "fonts").resolve()
 RESULT_ROOT.mkdir(parents=True, exist_ok=True)
 
 app.add_middleware(
@@ -343,6 +345,72 @@ async def list_results():
         return {"directories": directories}
     except Exception as e:
         raise HTTPException(500, detail=f"Error listing results: {str(e)}")
+
+@app.get("/results/download.zip", tags=["api", "file"])
+async def download_all_results():
+    """Download all final translated images as a zip archive"""
+    result_dir = RESULT_ROOT
+    if not result_dir.exists():
+        raise HTTPException(404, detail="Result directory not found")
+
+    zip_buffer = io.BytesIO()
+    count = 0
+    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        for item_path in sorted(result_dir.iterdir(), key=lambda path: path.name):
+            if not item_path.is_dir():
+                continue
+            final_png_path = item_path / "final.png"
+            if final_png_path.exists() and final_png_path.is_file():
+                zip_file.write(final_png_path, arcname=f"{item_path.name}.png")
+                count += 1
+
+    if count == 0:
+        raise HTTPException(404, detail="No translated images found")
+
+    zip_buffer.seek(0)
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=manga-translator-results.zip"},
+    )
+
+@app.get("/results/{folder_name}/download.zip", tags=["api", "file"])
+async def download_result(folder_name: str):
+    """Download one result directory as a zip archive"""
+    folder_path = (RESULT_ROOT / folder_name).resolve()
+    if RESULT_ROOT not in folder_path.parents or not folder_path.is_dir():
+        raise HTTPException(404, detail="Result directory not found")
+
+    final_png_path = folder_path / "final.png"
+    if not final_png_path.exists():
+        raise HTTPException(404, detail="final.png not found in folder")
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        for file_path in sorted(folder_path.iterdir(), key=lambda path: path.name):
+            if file_path.is_file():
+                zip_file.write(file_path, arcname=file_path.name)
+
+    zip_buffer.seek(0)
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename={folder_name}.zip"},
+    )
+
+@app.get("/fonts/list", tags=["api"])
+async def list_fonts():
+    """List bundled font files that can be used for rendering"""
+    extensions = {".ttf", ".otf", ".ttc"}
+    fonts = []
+    if FONT_ROOT.exists():
+        for font_path in sorted(FONT_ROOT.iterdir(), key=lambda path: path.name.lower()):
+            if font_path.is_file() and font_path.suffix.lower() in extensions:
+                fonts.append({
+                    "name": font_path.name,
+                    "path": str(font_path.relative_to(BASE_DIR.parent)),
+                })
+    return {"fonts": fonts}
 
 @app.delete("/results/clear", tags=["api"])
 async def clear_results():
