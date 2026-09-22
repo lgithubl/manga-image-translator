@@ -48,6 +48,8 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
 
     def parse_args(self, args: TranslatorConfig):
         self.config = args.chatgpt_config
+        if args.custom_openai_model:
+            self.model = args.custom_openai_model
 
 
     def extract_capture_groups(self, text, regex=r"(.*)"):

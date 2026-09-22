@@ -149,6 +149,23 @@
             >
               Use Codex
             </button>
+            <div class="relative" title="Codex model">
+              <select
+                class="appearance-none bg-transparent border-b border-gray-300 pl-2 pr-7 py-1 outline-none focus:border-blue-500 max-w-56"
+                v-model="codexModel"
+                :disabled="codexModelsLoading || !codexModels.length"
+                @change="onSettingChange"
+              >
+                <option value="">{{ codexModelsLoading ? 'Loading models...' : 'Select model' }}</option>
+                <option v-for="model in codexModels" :value="model" :key="model">
+                  {{ model }}
+                </option>
+              </select>
+              <i
+                class="iconify absolute top-1 right-1 text-gray-500 pointer-events-none"
+                data-icon="carbon:chevron-down"
+              ></i>
+            </div>
             <span
               class="text-xs"
               :class="codexAuthStatus.authenticated ? 'text-green-700' : 'text-gray-500'"
@@ -861,6 +878,9 @@
         codexAuthPollTimer: null,
         codexAuthMessage: "",
         codexDevice: {},
+        codexModels: [],
+        codexModel: "",
+        codexModelsLoading: false,
         codexAuthStatus: {
           authenticated: false,
           auth_path: "",
@@ -926,6 +946,7 @@
               if (settings.customBoxThreshold) this.customBoxThreshold = settings.customBoxThreshold;
               if (settings.maskDilationOffset) this.maskDilationOffset = settings.maskDilationOffset;
               if (settings.inpainter) this.inpainter = settings.inpainter;
+              if (settings.codexModel) this.codexModel = settings.codexModel;
             }
           } catch (error) {
             console.warn('Failed to load settings:', error);
@@ -945,6 +966,7 @@
               customBoxThreshold: this.customBoxThreshold,
               maskDilationOffset: this.maskDilationOffset,
               inpainter: this.inpainter,
+              codexModel: this.codexModel,
             };
             localStorage.setItem('manga-translator-settings', JSON.stringify(settings));
           } catch (error) {
@@ -957,16 +979,46 @@
             const response = await fetch(`${BASE_URI}codex-auth/status`);
             if (response.ok) {
               this.codexAuthStatus = await response.json();
+              if (this.codexAuthStatus.authenticated) {
+                await this.loadCodexModels();
+              }
             }
           } catch (error) {
             console.warn('Failed to load Codex auth status:', error);
           }
         },
 
-        useCodexTranslator() {
+        async loadCodexModels() {
+          this.codexModelsLoading = true;
+          try {
+            const response = await fetch(`${BASE_URI}v1/models`);
+            if (!response.ok) {
+              throw new Error(await response.text());
+            }
+            const data = await response.json();
+            const models = (data.data || [])
+              .map((item) => item && item.id)
+              .filter((id) => typeof id === "string" && id.length > 0);
+            this.codexModels = [...new Set(models)];
+            if (!this.codexModel && this.codexModels.length) {
+              this.codexModel = this.codexModels[0];
+              this.saveSettings();
+            } else if (this.codexModel && !this.codexModels.includes(this.codexModel)) {
+              this.codexModel = this.codexModels[0] || "";
+              this.saveSettings();
+            }
+          } catch (error) {
+            console.warn('Failed to load Codex models:', error);
+            this.codexAuthMessage = `Failed to load Codex models: ${error.message}`;
+          } finally {
+            this.codexModelsLoading = false;
+          }
+        },
+
+        async useCodexTranslator() {
           this.translator = "custom_openai";
           this.saveSettings();
-          this.loadCodexAuthStatus();
+          await this.loadCodexAuthStatus();
           this.codexAuthMessage = this.codexAuthStatus.authenticated
             ? "custom_openai is now routed through the built-in Codex relay."
             : "custom_openai selected. Login Codex before translating.";
@@ -1008,7 +1060,7 @@
                   this.codexDevice = {};
                   this.codexAuthStatus = data;
                   this.codexAuthMessage = "Codex login completed. You can translate with custom_openai now.";
-                  this.useCodexTranslator();
+                  await this.useCodexTranslator();
                 }
               } catch (error) {
                 clearInterval(this.codexAuthPollTimer);
@@ -1348,7 +1400,8 @@
           },
           "translator": {
             "translator": "${this.translator}",
-            "target_lang": "${this.targetLanguage}"
+            "target_lang": "${this.targetLanguage}",
+            "custom_openai_model": "${this.codexModel}"
           },
           "inpainter": {
             "inpainter": "${this.inpainter}",
