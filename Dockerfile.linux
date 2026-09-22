@@ -1,0 +1,37 @@
+FROM pytorch/pytorch:2.5.1-cuda11.8-cudnn9-runtime
+
+ARG PRELOAD_MODELS=false
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+WORKDIR /app
+
+COPY requirements.txt /app/requirements.txt
+
+RUN apt-get update --yes \
+    && apt-get install --yes --no-install-recommends \
+        ffmpeg \
+        g++ \
+        gcc \
+        gimp \
+        git \
+        libglib2.0-0 \
+        libgl1 \
+        libsm6 \
+        libvulkan1 \
+        libxext6 \
+    && pip install --no-cache-dir -r /app/requirements.txt \
+    && apt-get remove --yes g++ gcc git \
+    && apt-get autoremove --yes \
+    && rm -rf /var/lib/apt/lists/* /root/.cache/pip
+
+COPY . /app
+
+RUN if [ "$PRELOAD_MODELS" = "true" ]; then \
+        python -u docker_prepare.py --continue-on-error; \
+    fi
+
+ENTRYPOINT ["python", "-m", "manga_translator"]
+CMD ["--help"]
