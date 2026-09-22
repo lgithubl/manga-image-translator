@@ -6,11 +6,15 @@ on:
       image:
         description: Docker image to run
         required: true
-        default: gho1920/manga-image-translator:linux-cpu
+        default: ghcr.io/lgithubl/manga-image-translator:linux-cpu
       minutes:
         description: Minutes to keep the page alive
         required: true
         default: "60"
+
+permissions:
+  contents: read
+  packages: read
 
 jobs:
   interactive:
@@ -19,6 +23,14 @@ jobs:
     timeout-minutes: 75
 
     steps:
+      - name: Login to GitHub Container Registry
+        if: ${{ startsWith(inputs.image, 'ghcr.io/') }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Pull image
         run: docker pull "${{ inputs.image }}"
 
@@ -158,6 +170,11 @@ jobs:
               echo "Temporary URL: $URL"
               echo "Username: ${{ steps.auth.outputs.username }}"
               echo "Password: ${{ steps.auth.outputs.password }}"
+              {
+                echo "URL=$URL"
+                echo "USERNAME=${{ steps.auth.outputs.username }}"
+                echo "PASSWORD=${{ steps.auth.outputs.password }}"
+              } > "$RUNNER_TEMP/mit-connection-info.txt"
               exit 0
             fi
             cat /tmp/cloudflared.log || true
@@ -165,6 +182,14 @@ jobs:
           done
           cat /tmp/cloudflared.log || true
           exit 1
+
+      - name: Upload connection info
+        uses: actions/upload-artifact@v6
+        with:
+          name: manga-image-translator-connection-info
+          path: ${{ runner.temp }}/mit-connection-info.txt
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Keep session alive
         run: |

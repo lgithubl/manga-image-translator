@@ -20,10 +20,6 @@ on:
         required: true
         type: boolean
         default: false
-      dockerhub_image:
-        description: Optional Docker Hub image, for example username/manga-image-translator
-        required: false
-        default: ""
 
 permissions:
   contents: read
@@ -33,9 +29,6 @@ jobs:
   build:
     name: Build and publish image
     runs-on: ubuntu-22.04
-    env:
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
     steps:
       - name: Checkout
@@ -51,25 +44,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to Docker Hub
-        if: ${{ inputs.dockerhub_image != '' && env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
-        uses: docker/login-action@v3
-        with:
-          username: ${{ env.DOCKERHUB_USERNAME }}
-          password: ${{ env.DOCKERHUB_TOKEN }}
-
       - name: Prepare tags
         id: tags
         shell: bash
         run: |
-          {
-            echo "tags<<EOF"
-            echo "ghcr.io/${{ github.repository }}:${{ inputs.tag }}"
-            if [ -n "${{ inputs.dockerhub_image }}" ] && [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
-              echo "${{ inputs.dockerhub_image }}:${{ inputs.tag }}"
-            fi
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          IMAGE="ghcr.io/${{ github.repository }}:${{ inputs.tag }}"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=manga-image-translator-${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
 
       - name: Select Dockerfile
         id: dockerfile
@@ -87,8 +68,21 @@ jobs:
           context: .
           file: ${{ steps.dockerfile.outputs.file }}
           push: true
-          tags: ${{ steps.tags.outputs.tags }}
+          tags: ${{ steps.tags.outputs.image }}
           build-args: |
             PRELOAD_MODELS=${{ inputs.preload_models }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Export image tarball
+        run: |
+          docker pull "${{ steps.tags.outputs.image }}"
+          docker save "${{ steps.tags.outputs.image }}" | gzip -1 > "${{ steps.tags.outputs.artifact_name }}.tar.gz"
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.tags.outputs.artifact_name }}
+          path: ${{ steps.tags.outputs.artifact_name }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
