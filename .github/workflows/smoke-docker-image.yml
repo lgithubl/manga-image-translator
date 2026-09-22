@@ -1,0 +1,73 @@
+name: Smoke Test Docker Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Docker image to run
+        required: true
+        default: gho1920/manga-image-translator:linux-cpu
+
+jobs:
+  smoke:
+    name: Run image and capture page
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Pull image
+        run: docker pull "${{ inputs.image }}"
+
+      - name: Start server
+        run: |
+          mkdir -p "$RUNNER_TEMP/codex" "$RUNNER_TEMP/result"
+          docker run -d --name mit-smoke \
+            -p 8000:8000 \
+            -v "$RUNNER_TEMP/codex:/root/.codex" \
+            -v "$RUNNER_TEMP/result:/app/result" \
+            --entrypoint python \
+            "${{ inputs.image }}" \
+            server/main.py --host=0.0.0.0 --port=8000
+
+      - name: Wait for server
+        run: |
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8000/ >/tmp/mit-index.html; then
+              exit 0
+            fi
+            docker logs --tail 80 mit-smoke || true
+            sleep 2
+          done
+          docker logs mit-smoke || true
+          exit 1
+
+      - name: Check Codex auth endpoint
+        run: |
+          curl -fsS http://127.0.0.1:8000/codex-auth/status | tee /tmp/codex-auth-status.json
+
+      - name: Capture screenshot
+        run: |
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund playwright@1.56.1
+          npx playwright install --with-deps chromium
+          npx playwright screenshot --wait-for-timeout=2000 http://127.0.0.1:8000/ /tmp/mit-home.png
+
+      - name: Collect logs
+        if: always()
+        run: |
+          docker logs mit-smoke >/tmp/mit-container.log 2>&1 || true
+          docker ps -a >/tmp/mit-docker-ps.txt || true
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: manga-image-translator-smoke
+          path: |
+            /tmp/mit-home.png
+            /tmp/mit-index.html
+            /tmp/codex-auth-status.json
+            /tmp/mit-container.log
+            /tmp/mit-docker-ps.txt
+          if-no-files-found: warn
+          retention-days: 7
