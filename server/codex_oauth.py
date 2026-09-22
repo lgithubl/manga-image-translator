@@ -172,7 +172,7 @@ def _chat_to_responses_payload(body: Dict[str, Any]) -> Dict[str, Any]:
         "instructions": instructions,
         "input": input_messages or [{"role": "user", "content": ""}],
         "store": False,
-        "stream": bool(body.get("stream")),
+        "stream": True,
         "max_output_tokens": body.get("max_tokens") or body.get("max_completion_tokens"),
     }
 
@@ -260,6 +260,11 @@ def _is_unsupported_model_error(resp: httpx.Response) -> bool:
     return resp.status_code == 400 and "model" in text and "not supported" in text
 
 
+def _is_unsupported_model_error_text(status_code: int, text: str) -> bool:
+    lower = text.lower()
+    return status_code == 400 and "model" in lower and "not supported" in lower
+
+
 def _drop_none(data: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in data.items() if v is not None}
 
@@ -299,6 +304,52 @@ def _chat_response(body: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]
             "total_tokens": usage.get("total_tokens", 0),
         },
     }
+
+
+async def _collect_codex_stream(
+    client: httpx.AsyncClient,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    async with client.stream("POST", f"{CODEX_BASE_URL}/responses", headers=headers, json=payload) as resp:
+        if resp.status_code >= 400:
+            detail = await resp.aread()
+            raise HTTPException(resp.status_code, detail=detail.decode(errors="replace")[:1000])
+
+        text_chunks: List[str] = []
+        response_id = f"chatcmpl-{int(time.time())}"
+        usage: Dict[str, Any] = {}
+        model = payload.get("model") or CODEX_DEFAULT_MODEL
+        async for line in resp.aiter_lines():
+            if not line.startswith("data: "):
+                continue
+            raw = line[6:].strip()
+            if not raw or raw == "[DONE]":
+                continue
+            try:
+                event = json.loads(raw)
+            except Exception:
+                continue
+
+            if isinstance(event.get("response"), dict):
+                response = event["response"]
+                response_id = response.get("id") or response_id
+                model = response.get("model") or model
+                if isinstance(response.get("usage"), dict):
+                    usage = response["usage"]
+                output_text = _extract_text(response)
+                if output_text and not text_chunks:
+                    text_chunks.append(output_text)
+
+            if event.get("type") == "response.output_text.delta":
+                text_chunks.append(str(event.get("delta") or ""))
+
+        return {
+            "id": response_id,
+            "model": model,
+            "output_text": "".join(text_chunks).strip(),
+            "usage": usage,
+        }
 
 
 @router.get("/codex-auth/status")
@@ -404,20 +455,36 @@ async def codex_chat_completions(request: Request):
     token = await _get_access_token()
     payload = _drop_none(_chat_to_responses_payload(body))
     payload["model"] = await _resolve_model(token, payload.get("model"))
+    client_wants_stream = bool(body.get("stream"))
 
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
-        "Accept": "text/event-stream" if payload.get("stream") else "application/json",
+        "Accept": "text/event-stream",
     }
 
-    if payload.get("stream"):
+    if client_wants_stream:
         async def stream():
             async with httpx.AsyncClient(timeout=CODEX_REQUEST_TIMEOUT) as client:
-                async with client.stream("POST", f"{CODEX_BASE_URL}/responses", headers=headers, json=payload) as resp:
+                tried_models = {str(payload.get("model") or "")}
+                while True:
+                    stream_payload = dict(payload)
+                    stream_payload["stream"] = True
+                    resp_ctx = client.stream("POST", f"{CODEX_BASE_URL}/responses", headers=headers, json=stream_payload)
+                    resp = await resp_ctx.__aenter__()
                     if resp.status_code >= 400:
                         detail = await resp.aread()
-                        yield f"data: {json.dumps({'error': detail.decode(errors='replace')[:1000]})}\n\n"
+                        await resp_ctx.__aexit__(None, None, None)
+                        detail_text = detail.decode(errors="replace")[:1000]
+                        if _is_unsupported_model_error_text(resp.status_code, detail_text):
+                            models = await _get_available_models(token)
+                            candidates = _model_candidates(models, tried_models)
+                            if candidates:
+                                payload["model"] = candidates[0]
+                                tried_models.add(str(payload["model"]))
+                                continue
+                        yield f"data: {json.dumps({'error': detail_text})}\n\n"
+                        yield "data: [DONE]\n\n"
                         return
                     async for line in resp.aiter_lines():
                         if not line.startswith("data: "):
@@ -438,20 +505,25 @@ async def codex_chat_completions(request: Request):
                                 "choices": [{"index": 0, "delta": {"content": event.get("delta", "")}, "finish_reason": None}],
                             }
                             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                    await resp_ctx.__aexit__(None, None, None)
                     yield "data: [DONE]\n\n"
+                    return
         return StreamingResponse(stream(), media_type="text/event-stream")
 
     async with httpx.AsyncClient(timeout=CODEX_REQUEST_TIMEOUT) as client:
-        resp = await client.post(f"{CODEX_BASE_URL}/responses", headers=headers, json=payload)
         tried_models = {str(payload.get("model") or "")}
-        while _is_unsupported_model_error(resp):
-            models = await _get_available_models(token)
-            candidates = _model_candidates(models, tried_models)
-            if not candidates:
-                break
-            payload["model"] = candidates[0]
-            tried_models.add(str(payload["model"]))
-            resp = await client.post(f"{CODEX_BASE_URL}/responses", headers=headers, json=payload)
-    if resp.status_code >= 400:
-        raise HTTPException(resp.status_code, detail=resp.text[:1000])
-    return _chat_response(payload, resp.json())
+        while True:
+            try:
+                payload["stream"] = True
+                data = await _collect_codex_stream(client, headers, payload)
+                return _chat_response(payload, data)
+            except HTTPException as exc:
+                detail = str(exc.detail)
+                if not _is_unsupported_model_error_text(exc.status_code, detail):
+                    raise
+                models = await _get_available_models(token)
+                candidates = _model_candidates(models, tried_models)
+                if not candidates:
+                    raise
+                payload["model"] = candidates[0]
+                tried_models.add(str(payload["model"]))
