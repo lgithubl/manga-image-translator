@@ -173,7 +173,6 @@ def _chat_to_responses_payload(body: Dict[str, Any]) -> Dict[str, Any]:
         "input": input_messages or [{"role": "user", "content": ""}],
         "store": False,
         "stream": True,
-        "max_output_tokens": body.get("max_tokens") or body.get("max_completion_tokens"),
     }
 
 
