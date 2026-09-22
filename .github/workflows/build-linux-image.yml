@@ -6,9 +6,17 @@ on:
       tag:
         description: Image tag to publish
         required: true
-        default: linux-cuda
+        default: linux-cpu
+      variant:
+        description: Image variant to build
+        required: true
+        type: choice
+        options:
+          - cpu
+          - cuda
+        default: cpu
       preload_models:
-        description: Download bundled models while building the image
+        description: Download bundled models while building the image, CUDA variant only
         required: true
         type: boolean
         default: false
@@ -63,11 +71,21 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Select Dockerfile
+        id: dockerfile
+        shell: bash
+        run: |
+          if [ "${{ inputs.variant }}" = "cuda" ]; then
+            echo "file=Dockerfile.linux" >> "$GITHUB_OUTPUT"
+          else
+            echo "file=Dockerfile.cpu" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.linux
+          file: ${{ steps.dockerfile.outputs.file }}
           push: true
           tags: ${{ steps.tags.outputs.tags }}
           build-args: |
