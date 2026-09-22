@@ -1,0 +1,35 @@
+name: Export Docker Image Tarball
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Docker image to export
+        required: true
+        default: gho1920/manga-image-translator:linux-cpu
+      artifact_name:
+        description: Artifact name
+        required: true
+        default: manga-image-translator-linux-cpu
+
+jobs:
+  export:
+    name: Export image
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Pull image
+        run: docker pull "${{ inputs.image }}"
+
+      - name: Export image tarball
+        run: |
+          docker save "${{ inputs.image }}" | gzip -1 > "${{ inputs.artifact_name }}.tar.gz"
+          ls -lh "${{ inputs.artifact_name }}.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ inputs.artifact_name }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
