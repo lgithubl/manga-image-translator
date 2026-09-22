@@ -1010,6 +1010,8 @@
         fontColorPicker: "#000000",
         disableFontBorder: false,
         downloadZipName: "",
+        lastZipDownloadAt: 0,
+        lastZipDownloadKey: "",
         translator: "youdao",
         codexAuthLoading: false,
         codexAuthPollTimer: null,
@@ -2079,8 +2081,23 @@
     },
 
     downloadAllResults() {
+      const filename = this.zipDownloadName();
+      const downloadKey = `${this.finishedImages.length}:${filename}`;
+      const now = Date.now();
+      if (
+        this.lastZipDownloadKey === downloadKey &&
+        now - this.lastZipDownloadAt < 5 * 60 * 1000
+      ) {
+        const shouldDownload = window.confirm(
+          `这个 ZIP 刚刚已经点击下载过了，是否再次下载 ${filename}？`
+        );
+        if (!shouldDownload) return;
+      }
+
+      this.lastZipDownloadKey = downloadKey;
+      this.lastZipDownloadAt = now;
       this.saveSettings();
-      this.triggerDownload(`${BASE_URI}results/download.zip`, this.zipDownloadName());
+      this.triggerDownload(`${BASE_URI}results/download.zip`, filename);
     },
 
     downloadImage(image) {
