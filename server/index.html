@@ -335,6 +335,40 @@
             </div>
           </div>
 
+          <!-- Upscale -->
+          <div class="flex items-center gap-1" title="Upscale before detection">
+            <i class="iconify text-gray-600" data-icon="carbon:fit-to-screen"></i>
+            <div class="relative">
+              <select
+                class="appearance-none bg-transparent border-b border-gray-300 pl-2 pr-7 py-1 outline-none focus:border-blue-500 w-24"
+                v-model="upscaleRatio"
+                @change="onSettingChange"
+              >
+                <option value="">No upscale</option>
+                <option value="2">2x</option>
+                <option value="3">3x</option>
+                <option value="4">4x</option>
+              </select>
+              <i
+                class="iconify absolute top-1 right-1 text-gray-500 pointer-events-none"
+                data-icon="carbon:chevron-down"
+              ></i>
+            </div>
+          </div>
+
+          <!-- Revert upscale -->
+          <div class="flex items-center gap-2" title="Downscale the final image back to original size after upscaling">
+            <input
+              id="revert-upscaling"
+              type="checkbox"
+              class="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+              v-model="revertUpscaling"
+              :disabled="!upscaleRatio"
+              @change="onSettingChange"
+            />
+            <label for="revert-upscaling" class="text-sm text-gray-700">Revert upscale</label>
+          </div>
+
           <!-- Render font -->
           <div class="flex items-center gap-1" title="Render preset">
             <i class="iconify text-gray-600" data-icon="carbon:template"></i>
@@ -1069,6 +1103,8 @@
         customBoxThreshold: 0.7,
         maskDilationOffset: 30,
         inpainter: "lama_large",
+        upscaleRatio: "",
+        revertUpscaling: false,
 
         uploadController: null,
 
@@ -1093,6 +1129,8 @@
               if (settings.customBoxThreshold) this.customBoxThreshold = settings.customBoxThreshold;
               if (settings.maskDilationOffset) this.maskDilationOffset = settings.maskDilationOffset;
               if (settings.inpainter) this.inpainter = settings.inpainter;
+              if (settings.upscaleRatio !== undefined) this.upscaleRatio = settings.upscaleRatio;
+              if (settings.revertUpscaling !== undefined) this.revertUpscaling = settings.revertUpscaling;
               if (settings.codexModel) this.codexModel = settings.codexModel;
               if (settings.renderPreset) this.renderPreset = settings.renderPreset;
               if (settings.selectedFontPath) this.selectedFontPath = settings.selectedFontPath;
@@ -1120,6 +1158,8 @@
               customBoxThreshold: this.customBoxThreshold,
               maskDilationOffset: this.maskDilationOffset,
               inpainter: this.inpainter,
+              upscaleRatio: this.upscaleRatio,
+              revertUpscaling: this.revertUpscaling,
               codexModel: this.codexModel,
               renderPreset: this.renderPreset,
               selectedFontPath: this.selectedFontPath,
@@ -1536,6 +1576,8 @@
               customBoxThreshold: this.customBoxThreshold,
               maskDilationOffset: this.maskDilationOffset,
               inpainter: this.inpainter,
+              upscaleRatio: this.upscaleRatio,
+              revertUpscaling: this.revertUpscaling,
               selectedFontPath: this.selectedFontPath,
               fontSize: this.fontSize,
               fontSizeOffset: this.fontSizeOffset,
@@ -1684,6 +1726,11 @@
             inpainter: {
               inpainter: this.inpainter,
               inpainting_size: Number(this.inpaintingSize),
+            },
+            upscale: {
+              upscaler: "esrgan",
+              upscale_ratio: this.upscaleRatio ? Number(this.upscaleRatio) : null,
+              revert_upscaling: Boolean(this.revertUpscaling && this.upscaleRatio),
             },
             mask_dilation_offset: Number(this.maskDilationOffset),
           };
@@ -2037,6 +2084,8 @@
         customBoxThreshold: this.customBoxThreshold,
         maskDilationOffset: this.maskDilationOffset,
         inpainter: this.inpainter,
+        upscaleRatio: this.upscaleRatio,
+        revertUpscaling: this.revertUpscaling,
         selectedFontPath: this.selectedFontPath,
         fontSize: this.fontSize,
         fontSizeOffset: this.fontSizeOffset,
