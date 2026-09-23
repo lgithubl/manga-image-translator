@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      0.1.5
+// @version      0.1.6
 // @description  Collect manga page images and submit them to a manga-image-translator server.
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -50,12 +50,15 @@
     resultsCount: 0,
     lastMessage: "",
     collapsed: false,
+    panelLeft: null,
+    panelTop: null,
   };
 
   let state = loadState();
   let running = false;
   let root;
   let statusTimer;
+  let suppressMiniClickUntil = 0;
 
   function loadState() {
     try {
@@ -505,12 +508,93 @@
     return `队列 ${state.queue.length} | 待翻译 ${counts.pending || 0} | 完成 ${counts.done || 0} | 失败 ${counts.error || 0} | 服务端结果 ${state.resultsCount || 0}`;
   }
 
+  function clampPanelPosition(left, top) {
+    const rect = root?.getBoundingClientRect();
+    const width = rect?.width || 56;
+    const height = rect?.height || 40;
+    const margin = 8;
+    return {
+      left: Math.min(Math.max(margin, left), Math.max(margin, window.innerWidth - width - margin)),
+      top: Math.min(Math.max(margin, top), Math.max(margin, window.innerHeight - height - margin)),
+    };
+  }
+
+  function applyPanelPosition() {
+    if (!root) return;
+    if (Number.isFinite(state.panelLeft) && Number.isFinite(state.panelTop)) {
+      const pos = clampPanelPosition(state.panelLeft, state.panelTop);
+      state.panelLeft = pos.left;
+      state.panelTop = pos.top;
+      root.style.left = `${pos.left}px`;
+      root.style.top = `${pos.top}px`;
+      root.style.right = "auto";
+    } else {
+      root.style.left = "";
+      root.style.top = "";
+      root.style.right = "";
+    }
+  }
+
+  function bindMiniDrag() {
+    const el = root?.querySelector(".mit-mini-toggle");
+    if (!el) return;
+    let dragging = false;
+    let moved = false;
+    let startX = 0;
+    let startY = 0;
+    let startLeft = 0;
+    let startTop = 0;
+
+    el.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      const rect = root.getBoundingClientRect();
+      dragging = true;
+      moved = false;
+      startX = event.clientX;
+      startY = event.clientY;
+      startLeft = rect.left;
+      startTop = rect.top;
+      el.setPointerCapture?.(event.pointerId);
+    });
+
+    el.addEventListener("pointermove", (event) => {
+      if (!dragging) return;
+      const dx = event.clientX - startX;
+      const dy = event.clientY - startY;
+      if (Math.abs(dx) + Math.abs(dy) > 4) moved = true;
+      if (!moved) return;
+      const pos = clampPanelPosition(startLeft + dx, startTop + dy);
+      state.panelLeft = pos.left;
+      state.panelTop = pos.top;
+      root.style.left = `${pos.left}px`;
+      root.style.top = `${pos.top}px`;
+      root.style.right = "auto";
+      event.preventDefault();
+    });
+
+    const finishDrag = (event) => {
+      if (!dragging) return;
+      dragging = false;
+      el.releasePointerCapture?.(event.pointerId);
+      if (moved) {
+        suppressMiniClickUntil = Date.now() + 350;
+        saveState();
+      }
+    };
+
+    el.addEventListener("pointerup", finishDrag);
+    el.addEventListener("pointercancel", finishDrag);
+  }
+
   function render() {
     if (!root) return;
     root.classList.toggle("mit-root-collapsed", state.collapsed);
     if (state.collapsed) {
       root.innerHTML = `<button class="mit-mini-toggle" data-action="toggle">MIT</button>`;
+      applyPanelPosition();
+      bindMiniDrag();
       button('[data-action="toggle"]', () => {
+        if (Date.now() < suppressMiniClickUntil) return;
         state.collapsed = false;
         saveState();
         render();
@@ -558,6 +642,7 @@
         </div>
       </div>
     `;
+    applyPanelPosition();
 
     button('[data-action="toggle"]', () => {
       state.collapsed = true;
@@ -659,6 +744,8 @@
         padding: 7px 10px;
         border-radius: 999px;
         box-shadow: 0 10px 28px rgba(15, 23, 42, 0.22);
+        touch-action: none;
+        user-select: none;
       }
       #mit-submitter-root label {
         display: grid;
