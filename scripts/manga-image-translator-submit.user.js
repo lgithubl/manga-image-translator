@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      0.1.4
+// @version      0.1.5
 // @description  Collect manga page images and submit them to a manga-image-translator server.
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -507,6 +507,17 @@
 
   function render() {
     if (!root) return;
+    root.classList.toggle("mit-root-collapsed", state.collapsed);
+    if (state.collapsed) {
+      root.innerHTML = `<button class="mit-mini-toggle" data-action="toggle">MIT</button>`;
+      button('[data-action="toggle"]', () => {
+        state.collapsed = false;
+        saveState();
+        render();
+      });
+      return;
+    }
+
     const queuePreview = state.queue.map((item, index) => `
       <div class="mit-row" title="${escapeHtml(item.url)}">
         <span>${index + 1}</span>
@@ -516,10 +527,10 @@
     `).join("");
 
     root.innerHTML = `
-      <div class="mit-card ${state.collapsed ? "mit-collapsed" : ""}">
+      <div class="mit-card">
         <div class="mit-head">
           <strong>MIT Submitter</strong>
-          <button data-action="toggle">${state.collapsed ? "展开" : "收起"}</button>
+          <button data-action="toggle">收起</button>
         </div>
         <div class="mit-body">
           <label>Host <input data-field="host" value="${escapeAttr(state.host)}" placeholder="https://your-mit-host"></label>
@@ -549,7 +560,7 @@
     `;
 
     button('[data-action="toggle"]', () => {
-      state.collapsed = !state.collapsed;
+      state.collapsed = true;
       saveState();
       render();
     });
@@ -608,6 +619,10 @@
       #mit-submitter-root * {
         box-sizing: border-box;
       }
+      #mit-submitter-root.mit-root-collapsed {
+        width: auto;
+        max-width: none;
+      }
       #mit-submitter-root .mit-card {
         background: #f8fafc;
         border: 1px solid #b8c2cc;
@@ -637,6 +652,13 @@
       }
       #mit-submitter-root .mit-collapsed .mit-body {
         display: none;
+      }
+      #mit-submitter-root .mit-mini-toggle {
+        min-width: 48px;
+        min-height: 36px;
+        padding: 7px 10px;
+        border-radius: 999px;
+        box-shadow: 0 10px 28px rgba(15, 23, 42, 0.22);
       }
       #mit-submitter-root label {
         display: grid;
