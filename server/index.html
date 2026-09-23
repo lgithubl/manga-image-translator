@@ -736,6 +736,14 @@
                      class="text-xs text-red-600 max-w-32 truncate" :title="queuedImage.error">
                   {{ queuedImage.error }}
                 </div>
+
+                <!-- Retry button for failed items -->
+                <button v-if="queuedImage.status === 'error'"
+                        @click="retryQueueItem(queuedImage.id)"
+                        class="p-1 text-gray-400 hover:text-blue-500 transition-colors"
+                        title="Retry translation">
+                  <i class="iconify w-4 h-4" data-icon="carbon:restart"></i>
+                </button>
                 
                 <!-- Remove button for all items -->
                 <button @click="removeFromQueue(queuedImage.id)"
@@ -1756,15 +1764,8 @@
                   break;
                 case 2:
                   const errorText = decoder.decode(data);
-                  // Update the processing item status
-                  if (processingItemIndex !== -1) {
-                    this.queuedImages[processingItemIndex] = {
-                      ...this.queuedImages[processingItemIndex],
-                      status: 'error',
-                      error: errorText
-                    };
-                  }
                   console.error(errorText);
+                  this.markQueueItemErrorAndContinue(queuedImage.id, errorText);
                   break;
                 case 3:
                   const queuePos = decoder.decode(data);
@@ -1802,14 +1803,11 @@
               );
 
               if (response.status !== 200) {
-                const processingItemIndex = this.queuedImages.findIndex(item => item.id === queuedImage.id);
-                if (processingItemIndex !== -1) {
-                  this.queuedImages[processingItemIndex] = {
-                    ...this.queuedImages[processingItemIndex],
-                    status: "error",
-                    error: "Upload failed"
-                  };
-                }
+                let errorText = "Upload failed";
+                try {
+                  errorText = await response.text() || errorText;
+                } catch (_) {}
+                this.markQueueItemErrorAndContinue(queuedImage.id, errorText);
                 return;
               }
 
@@ -1826,14 +1824,7 @@
                 return;
               }
               console.error(error);
-              const processingItemIndex = this.queuedImages.findIndex(item => item.id === queuedImage.id);
-              if (processingItemIndex !== -1) {
-                this.queuedImages[processingItemIndex] = {
-                  ...this.queuedImages[processingItemIndex],
-                  status: "error",
-                  error: "Connection error"
-                };
-              }
+              this.markQueueItemErrorAndContinue(queuedImage.id, error.message || "Connection error");
             }
           };
 
@@ -1991,6 +1982,45 @@
         this.processTranslation(this.queuedImages[nextItemIndex]);
       } else {
         console.log("No queued items to process");
+      }
+    },
+
+    hasActiveTranslation() {
+      const processingSteps = ['processing', 'upload', 'pending', 'detection', 'ocr', 'mask-generation', 'inpainting', 'upscaling', 'translating', 'rendering'];
+      return this.queuedImages.some(item => processingSteps.includes(item.status));
+    },
+
+    markQueueItemErrorAndContinue(id, errorMessage) {
+      const itemIndex = this.queuedImages.findIndex(item => item.id === id);
+      if (itemIndex !== -1) {
+        this.queuedImages[itemIndex] = {
+          ...this.queuedImages[itemIndex],
+          status: 'error',
+          error: errorMessage || 'Translation failed',
+          progress: null,
+          queuePos: null
+        };
+      }
+      setTimeout(() => {
+        this.processNextInQueue();
+      }, 500);
+    },
+
+    retryQueueItem(id) {
+      const itemIndex = this.queuedImages.findIndex(item => item.id === id);
+      if (itemIndex === -1) return;
+
+      const retryItem = {
+        ...this.queuedImages[itemIndex],
+        status: this.hasActiveTranslation() ? 'queued' : 'processing',
+        error: null,
+        progress: null,
+        queuePos: null
+      };
+      this.queuedImages[itemIndex] = retryItem;
+
+      if (retryItem.status === 'processing') {
+        this.processTranslation(retryItem);
       }
     },
 
