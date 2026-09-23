@@ -373,8 +373,50 @@ class SakuraTranslator(CommonTranslator):
         将字符串按换行符分割为列表。
         """
         if isinstance(text, list):
-            return text
+            return self._normalize_response_text(text).split('\n')
         return text.split('\n')
+
+    def _normalize_response_text(self, content) -> str:
+        """
+        Normalize OpenAI-compatible response content into plain text.
+
+        Some servers return message.content as a list of content parts instead of
+        a string. Sakura's validation pipeline expects strings throughout.
+        """
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    value = item.get("text")
+                    if value is None:
+                        value = item.get("content")
+                    if value is not None:
+                        parts.append(self._normalize_response_text(value))
+                else:
+                    text = getattr(item, "text", None)
+                    if text is None:
+                        text = getattr(item, "content", None)
+                    if text is not None:
+                        parts.append(self._normalize_response_text(text))
+            return "".join(parts)
+        if isinstance(content, dict):
+            value = content.get("text")
+            if value is None:
+                value = content.get("content")
+            return self._normalize_response_text(value) if value is not None else str(content)
+        text = getattr(content, "text", None)
+        if text is not None:
+            return self._normalize_response_text(text)
+        nested_content = getattr(content, "content", None)
+        if nested_content is not None:
+            return self._normalize_response_text(nested_content)
+        return str(content)
 
     def _preprocess_queries(self, queries: List[str]) -> List[str]:
         """
@@ -515,10 +557,10 @@ class SakuraTranslator(CommonTranslator):
                 server_error_attempt += 1
                 if server_error_attempt >= self._RETRY_ATTEMPTS:
                     self.logger.error(f'Sakura API请求失败。错误信息： {e}')
-                    return prompt
+                    return self._normalize_response_text(prompt)
                 self.logger.warning(f'Sakura因服务器错误而进行重试。尝试次数： {server_error_attempt}，错误信息： {e}')
 
-        return response
+        return self._normalize_response_text(response)
 
     async def _request_translation(self, input_text_list) -> str:
         """
@@ -581,7 +623,7 @@ class SakuraTranslator(CommonTranslator):
             if 'text' in choice:
                 return choice.text
 
-        return response.choices[0].message.content
+        return self._normalize_response_text(response.choices[0].message.content)
 
     def _set_gpt_style(self, style_name: str):
         """
