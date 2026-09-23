@@ -9,6 +9,7 @@ except ImportError:
 import asyncio
 from typing import List, Dict, Callable, Tuple
 
+from ..config import TranslatorConfig
 from .common import CommonTranslator
 from .keys import SAKURA_API_BASE, SAKURA_VERSION, SAKURA_DICT_PATH
 
@@ -223,24 +224,42 @@ class SakuraTranslator(CommonTranslator):
     def __init__(self):
         super().__init__()
         self.client = openai.AsyncOpenAI(api_key = openai.api_key or 'empty')
-        if "/v1" not in SAKURA_API_BASE:
-            self.client.base_url = SAKURA_API_BASE + "/v1"
-        else:
-            self.client.base_url = SAKURA_API_BASE
+        self.api_base = self._normalize_api_base(SAKURA_API_BASE)
+        self.client.base_url = self.api_base
         self.client.api_key = "sk-114514"
+        self.model = "sukinishiro"
+        self.version = SAKURA_VERSION
+        self.dict_path = SAKURA_DICT_PATH
         self.temperature = 0.3
         self.top_p = 0.3
         self.frequency_penalty = 0.1
         self._current_style = "precise"
         self._emoji_pattern = re.compile(r'[\U00010000-\U0010ffff]')
         self._heart_pattern = re.compile(r'❤')
-        self.sakura_dict = SakuraDict(self.get_dict_path(), self.logger, SAKURA_VERSION)
+        self.sakura_dict = SakuraDict(self.get_dict_path(), self.logger, self.version)
+
+    def _normalize_api_base(self, api_base: str):
+        if not api_base:
+            api_base = SAKURA_API_BASE
+        api_base = api_base.rstrip("/")
+        if "/v1" not in api_base:
+            return api_base + "/v1"
+        return api_base
+
+    def parse_args(self, args: TranslatorConfig):
+        api_base = args.sakura_api_base or SAKURA_API_BASE
+        self.api_base = self._normalize_api_base(api_base)
+        self.client.base_url = self.api_base
+        self.model = args.sakura_model or "sukinishiro"
+        self.version = args.sakura_version or SAKURA_VERSION
+        self.dict_path = args.sakura_dict_path or SAKURA_DICT_PATH
+        self.sakura_dict = SakuraDict(self.get_dict_path(), self.logger, self.version)
 
     def get_sakura_version(self):
-        return SAKURA_VERSION
+        return self.version
 
     def get_dict_path(self):
-        return SAKURA_DICT_PATH
+        return self.dict_path
 
     def detect_and_caculate_repeats(self, s: str, threshold: int = _REPEAT_DETECT_THRESHOLD, remove_all=True) -> Tuple[bool, str, int, str]:
         """
@@ -517,7 +536,7 @@ class SakuraTranslator(CommonTranslator):
             'num_beams': 1,
             'repetition_penalty': 1.0,
         }
-        if SAKURA_VERSION == "0.9":
+        if self.get_sakura_version() == "0.9":
             messages = [
                 {
                     "role": "system",
@@ -541,16 +560,22 @@ class SakuraTranslator(CommonTranslator):
                     "content": f"根据以下术语表：\n{gpt_dict_raw_text}\n将下面的日文文本根据上述术语表的对应关系和注释翻译成中文：{raw_text}"
                 }
             ]
-        response = await self.client.chat.completions.create(
-            model="sukinishiro",
+        request_kwargs = dict(
+            model=self.model,
             messages=messages,
             temperature=self.temperature,
             top_p=self.top_p,
             max_tokens=max_token_num,
             frequency_penalty=self.frequency_penalty,
-            seed=-1,
-            extra_query=extra_query,
         )
+        try:
+            response = await self.client.chat.completions.create(
+                **request_kwargs,
+                seed=-1,
+                extra_query=extra_query,
+            )
+        except TypeError:
+            response = await self.client.chat.completions.create(**request_kwargs)
         # 提取并返回响应文本
         for choice in response.choices:
             if 'text' in choice:

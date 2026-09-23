@@ -229,6 +229,14 @@ class TranslatorConfig(BaseModel):
     """Path to GPT config file, more info in README"""
     custom_openai_model: Optional[str] = None
     """Override model for the custom_openai translator"""
+    sakura_api_base: Optional[str] = None
+    """Override Sakura OpenAI-compatible API base URL"""
+    sakura_model: Optional[str] = None
+    """Override Sakura model or llama-server alias"""
+    sakura_version: Optional[str] = None
+    """Override Sakura prompt version. Valid values are 0.9 and 0.10"""
+    sakura_dict_path: Optional[str] = None
+    """Override Sakura dictionary path"""
     translator_chain: Optional[str] = None
     """Output of one translator goes in another. Example: --translator-chain "google:JPN;sugoi:ENG"."""
     selective_translation: Optional[str] = None

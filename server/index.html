@@ -235,6 +235,53 @@
           <div class="text-gray-600">{{ codexAuthMessage }}</div>
         </div>
 
+        <div
+          v-if="translator === 'sakura'"
+          class="border border-gray-200 rounded-md bg-gray-50 p-3 text-sm space-y-3"
+        >
+          <div class="font-semibold text-gray-700">Sakura Runtime</div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <label class="flex flex-col gap-1">
+              <span class="text-xs text-gray-500">API Base URL</span>
+              <input
+                class="border border-gray-300 rounded px-2 py-1"
+                v-model="sakuraApiBase"
+                @input="onSettingChange"
+                placeholder="http://local-llm-server:8080/v1"
+              />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-xs text-gray-500">Model / Alias</span>
+              <input
+                class="border border-gray-300 rounded px-2 py-1"
+                v-model="sakuraModel"
+                @input="onSettingChange"
+                placeholder="sukinishiro"
+              />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-xs text-gray-500">Version</span>
+              <select
+                class="border border-gray-300 rounded px-2 py-1"
+                v-model="sakuraVersion"
+                @change="onSettingChange"
+              >
+                <option value="0.9">0.9</option>
+                <option value="0.10">0.10</option>
+              </select>
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-xs text-gray-500">Dictionary Path</span>
+              <input
+                class="border border-gray-300 rounded px-2 py-1"
+                v-model="sakuraDictPath"
+                @input="onSettingChange"
+                placeholder="./dict/sakura_dict.txt"
+              />
+            </label>
+          </div>
+        </div>
+
         <!-- オプション（2段目） -->
         <div class="flex flex-wrap items-end gap-4">
           <!-- Inpainting Size -->
@@ -1055,6 +1102,10 @@
         lastZipDownloadAt: 0,
         lastZipDownloadKey: "",
         translator: "youdao",
+        sakuraApiBase: "http://local-llm-server:8080/v1",
+        sakuraModel: "sukinishiro",
+        sakuraVersion: "0.9",
+        sakuraDictPath: "./dict/sakura_dict.txt",
         codexAuthLoading: false,
         codexAuthPollTimer: null,
         codexAuthMessage: "",
@@ -1131,6 +1182,10 @@
               if (settings.inpainter) this.inpainter = settings.inpainter;
               if (settings.upscaleRatio !== undefined) this.upscaleRatio = settings.upscaleRatio;
               if (settings.revertUpscaling !== undefined) this.revertUpscaling = settings.revertUpscaling;
+              if (settings.sakuraApiBase) this.sakuraApiBase = settings.sakuraApiBase;
+              if (settings.sakuraModel) this.sakuraModel = settings.sakuraModel;
+              if (settings.sakuraVersion) this.sakuraVersion = settings.sakuraVersion;
+              if (settings.sakuraDictPath) this.sakuraDictPath = settings.sakuraDictPath;
               if (settings.codexModel) this.codexModel = settings.codexModel;
               if (settings.renderPreset) this.renderPreset = settings.renderPreset;
               if (settings.selectedFontPath) this.selectedFontPath = settings.selectedFontPath;
@@ -1160,6 +1215,10 @@
               inpainter: this.inpainter,
               upscaleRatio: this.upscaleRatio,
               revertUpscaling: this.revertUpscaling,
+              sakuraApiBase: this.sakuraApiBase,
+              sakuraModel: this.sakuraModel,
+              sakuraVersion: this.sakuraVersion,
+              sakuraDictPath: this.sakuraDictPath,
               codexModel: this.codexModel,
               renderPreset: this.renderPreset,
               selectedFontPath: this.selectedFontPath,
@@ -1722,6 +1781,10 @@
               translator: this.translator,
               target_lang: this.targetLanguage,
               custom_openai_model: this.codexModel,
+              sakura_api_base: this.sakuraApiBase || "http://local-llm-server:8080/v1",
+              sakura_model: this.sakuraModel || "sukinishiro",
+              sakura_version: this.sakuraVersion || "0.9",
+              sakura_dict_path: this.sakuraDictPath || "./dict/sakura_dict.txt",
             },
             inpainter: {
               inpainter: this.inpainter,
