@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      0.1.0
+// @version      0.1.1
 // @description  Collect manga page images and submit them to a manga-image-translator server.
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -465,14 +465,13 @@
 
   function render() {
     if (!root) return;
-    const queuePreview = state.queue.slice(0, 12).map((item, index) => `
+    const queuePreview = state.queue.map((item, index) => `
       <div class="mit-row" title="${escapeHtml(item.url)}">
         <span>${index + 1}</span>
         <span class="mit-status mit-${item.status}">${escapeHtml(item.status)}</span>
         <span>${escapeHtml(item.message || shortUrl(item.url))}</span>
       </div>
     `).join("");
-    const more = state.queue.length > 12 ? `<div class="mit-muted">还有 ${state.queue.length - 12} 项未显示</div>` : "";
 
     root.innerHTML = `
       <div class="mit-card ${state.collapsed ? "mit-collapsed" : ""}">
@@ -502,7 +501,7 @@
           </div>
           <div class="mit-summary">${escapeHtml(statusText())}</div>
           <div class="mit-message">${escapeHtml(state.lastMessage || "")}</div>
-          <div class="mit-list">${queuePreview || '<div class="mit-muted">还没有图片。点击“抓取图片”累计当前页图片。</div>'}${more}</div>
+          <div class="mit-list">${queuePreview || '<div class="mit-muted">还没有图片。点击“抓取图片”累计当前页图片。</div>'}</div>
         </div>
       </div>
     `;
@@ -558,6 +557,8 @@
         top: 72px;
         z-index: 2147483647;
         width: 360px;
+        max-width: calc(100vw - 24px);
+        max-height: calc(100dvh - 24px);
         color: #172026;
         font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         font-size: 13px;
@@ -571,6 +572,9 @@
         border-radius: 8px;
         box-shadow: 0 12px 36px rgba(15, 23, 42, 0.22);
         overflow: hidden;
+        max-height: calc(100dvh - 24px);
+        display: flex;
+        flex-direction: column;
       }
       #mit-submitter-root .mit-head {
         display: flex;
@@ -585,6 +589,9 @@
         display: grid;
         gap: 8px;
         padding: 10px;
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
       }
       #mit-submitter-root .mit-collapsed .mit-body {
         display: none;
@@ -651,8 +658,9 @@
       #mit-submitter-root .mit-list {
         display: grid;
         gap: 4px;
-        max-height: 260px;
+        max-height: min(260px, 34dvh);
         overflow: auto;
+        overscroll-behavior: contain;
       }
       #mit-submitter-root .mit-row {
         display: grid;
@@ -688,6 +696,27 @@
       #mit-submitter-root .mit-downloading {
         background: #dbeafe;
         color: #1d4ed8;
+      }
+      @media (max-width: 520px), (max-height: 680px) {
+        #mit-submitter-root {
+          left: 8px;
+          right: 8px;
+          top: 8px;
+          width: auto;
+          max-height: calc(100dvh - 16px);
+        }
+        #mit-submitter-root .mit-card {
+          max-height: calc(100dvh - 16px);
+        }
+        #mit-submitter-root .mit-actions {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        #mit-submitter-root textarea {
+          min-height: 82px;
+        }
+        #mit-submitter-root .mit-list {
+          max-height: 32dvh;
+        }
       }
     `);
   }
