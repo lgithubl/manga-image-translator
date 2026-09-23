@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      0.1.1
+// @version      0.1.2
 // @description  Collect manga page images and submit them to a manga-image-translator server.
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -556,8 +556,8 @@
         right: 16px;
         top: 72px;
         z-index: 2147483647;
-        width: 360px;
-        max-width: calc(100vw - 24px);
+        width: min(320px, calc(100vw - 16px));
+        max-width: calc(100vw - 16px);
         max-height: calc(100dvh - 24px);
         color: #172026;
         font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -699,10 +699,9 @@
       }
       @media (max-width: 520px), (max-height: 680px) {
         #mit-submitter-root {
-          left: 8px;
           right: 8px;
           top: 8px;
-          width: auto;
+          width: min(300px, calc(100vw - 16px));
           max-height: calc(100dvh - 16px);
         }
         #mit-submitter-root .mit-card {
