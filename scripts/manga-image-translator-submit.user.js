@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      0.1.3
+// @version      0.1.4
 // @description  Collect manga page images and submit them to a manga-image-translator server.
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -207,8 +207,19 @@
   function queueOutputName(item) {
     const ordered = state.queue.filter((entry) => entry.status !== "removed");
     const index = Math.max(0, ordered.findIndex((entry) => entry.id === item.id));
-    const ext = item.outputExt || extensionFromUrlOrType(item.url, "");
-    return `${String(index + 1).padStart(3, "0")}${ext}`;
+    const rawName = fileNameFromUrl(item.url, index + 1);
+    const rawExt = osExt(rawName) || extensionFromUrlOrType(item.url, "");
+    const ext = item.outputExt || rawExt;
+    const stem = rawName.slice(0, rawName.length - rawExt.length) || `image-${String(index + 1).padStart(3, "0")}`;
+    let duplicateIndex = 1;
+    for (let entryIndex = 0; entryIndex < ordered.length; entryIndex += 1) {
+      const entry = ordered[entryIndex];
+      if (entry.id === item.id) break;
+      if (fileNameFromUrl(entry.url, entryIndex + 1).toLowerCase() === rawName.toLowerCase()) {
+        duplicateIndex += 1;
+      }
+    }
+    return duplicateIndex > 1 ? `${stem}-${duplicateIndex}${ext}` : `${stem}${ext}`;
   }
 
   async function downloadImage(item) {
@@ -224,20 +235,27 @@
     const contentType = response.response?.type || response.responseHeaders?.match(/content-type:\s*([^\r\n]+)/i)?.[1] || "image/jpeg";
     const blob = response.response instanceof Blob ? response.response : new Blob([response.response], { type: contentType });
     const outputExt = extensionFromUrlOrType(item.url, blob.type || contentType);
-    const outputName = `${String(state.queue.findIndex((entry) => entry.id === item.id) + 1).padStart(3, "0")}${outputExt}`;
+    const outputName = queueOutputName({ ...item, outputExt });
     updateQueueItem(item.id, { outputName, outputExt });
     return new File([blob], outputName, { type: blob.type || contentType });
   }
 
-  function fileNameFromUrl(url) {
+  function osExt(name) {
+    const match = String(name || "").match(/\.(avif|bmp|gif|jpe?g|png|webp)$/i);
+    return match ? match[0].toLowerCase().replace(".jpeg", ".jpg") : "";
+  }
+
+  function fileNameFromUrl(url, fallbackIndex = 1) {
     try {
       const path = new URL(url).pathname;
       const name = decodeURIComponent(path.split("/").pop() || "");
-      if (name && IMAGE_EXTENSIONS.test(name)) return name.replace(/[\\/:*?"<>|]+/g, "-");
+      if (name && IMAGE_EXTENSIONS.test(name)) {
+        return name.replace(/[\\/:*?"<>|]+/g, "-").replace(/\.jpeg$/i, ".jpg");
+      }
     } catch (_) {
       // fall through
     }
-    return `manga-${Date.now()}.jpg`;
+    return `image-${String(fallbackIndex).padStart(3, "0")}.jpg`;
   }
 
   function updateQueueItem(id, patch) {
