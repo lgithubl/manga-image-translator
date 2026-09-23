@@ -348,7 +348,26 @@
     return base.toLowerCase().endsWith(".zip") ? base : `${base}.zip`;
   }
 
-  function downloadZip() {
+  function saveBlob(blob, filename) {
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
+  }
+
+  async function blobToText(blob) {
+    try {
+      return await blob.text();
+    } catch (_) {
+      return "";
+    }
+  }
+
+  async function downloadZip() {
     const host = normalizeHost(state.host);
     if (!host) {
       setMessage("请先填写 Host。");
@@ -357,24 +376,49 @@
     const url = `${host}/results/download.zip`;
     const headers = authHeader();
     const name = zipDownloadName();
-    if (Object.keys(headers).length) {
+
+    if (!Object.keys(headers).length && typeof GM_download === "function") {
       GM_download({
         url,
         name,
-        headers,
+        saveAs: true,
+        onload() {
+          setMessage(`已下载 ${name}`);
+        },
         onerror(error) {
-          setMessage(`下载 ZIP 失败: ${error.error || "unknown error"}`);
+          setMessage(`下载 ZIP 失败: ${error.error || "unknown error"}，尝试浏览器下载。`);
+          window.open(url, "_blank", "noopener,noreferrer");
         },
       });
-    } else {
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = name;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
+      setMessage(`已请求下载 ${name}`);
+      return;
     }
-    setMessage(`已请求下载 ${name}`);
+
+    try {
+      setMessage(`正在下载 ${name}...`);
+      const response = await gmRequest({
+        method: "GET",
+        url,
+        headers,
+        responseType: "blob",
+        timeout: 30 * 60 * 1000,
+      });
+      const blob = response.response instanceof Blob
+        ? response.response
+        : new Blob([response.response], { type: "application/zip" });
+      if (!blob.size) {
+        throw new Error("empty zip response");
+      }
+      const contentType = blob.type || "";
+      if (contentType.includes("application/json") || contentType.includes("text/")) {
+        const text = await blobToText(blob);
+        throw new Error(text || `unexpected response type: ${contentType}`);
+      }
+      saveBlob(blob, name);
+      setMessage(`已下载 ${name}`);
+    } catch (error) {
+      setMessage(`下载 ZIP 失败: ${error.message || String(error)}`);
+    }
   }
 
   function clearDone() {
