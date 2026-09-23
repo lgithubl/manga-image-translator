@@ -1,5 +1,7 @@
 import io
+import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -108,6 +110,7 @@ async def stream_image(req: Request, data: TranslateRequest) -> StreamingRespons
 async def json_form(req: Request, image: UploadFile = File(...), config: str = Form("{}")):
     img = await image.read()
     conf = Config.parse_raw(config)
+    conf.source_filename = image.filename
     ctx = await get_ctx(req, conf, img)
     return to_translation(ctx)
 
@@ -115,6 +118,7 @@ async def json_form(req: Request, image: UploadFile = File(...), config: str = F
 async def bytes_form(req: Request, image: UploadFile = File(...), config: str = Form("{}")):
     img = await image.read()
     conf = Config.parse_raw(config)
+    conf.source_filename = image.filename
     ctx = await get_ctx(req, conf, img)
     return StreamingResponse(content=to_translation(ctx).to_bytes())
 
@@ -122,6 +126,7 @@ async def bytes_form(req: Request, image: UploadFile = File(...), config: str = 
 async def image_form(req: Request, image: UploadFile = File(...), config: str = Form("{}")) -> StreamingResponse:
     img = await image.read()
     conf = Config.parse_raw(config)
+    conf.source_filename = image.filename
     ctx = await get_ctx(req, conf, img)
     img_byte_arr = io.BytesIO()
     ctx.result.save(img_byte_arr, format="PNG")
@@ -133,6 +138,7 @@ async def image_form(req: Request, image: UploadFile = File(...), config: str = 
 async def stream_json_form(req: Request, image: UploadFile = File(...), config: str = Form("{}")) -> StreamingResponse:
     img = await image.read()
     conf = Config.parse_raw(config)
+    conf.source_filename = image.filename
     # 标记这是Web前端调用，用于占位符优化
     conf._is_web_frontend = True
     return await while_streaming(req, transform_to_json, conf, img)
@@ -143,6 +149,7 @@ async def stream_json_form(req: Request, image: UploadFile = File(...), config: 
 async def stream_bytes_form(req: Request, image: UploadFile = File(...), config: str = Form("{}"))-> StreamingResponse:
     img = await image.read()
     conf = Config.parse_raw(config)
+    conf.source_filename = image.filename
     return await while_streaming(req, transform_to_bytes, conf, img)
 
 @app.post("/translate/with-form/image/stream", response_class=StreamingResponse, tags=["api", "form"], response_description="Standard streaming endpoint - returns complete image data. Suitable for API calls and scripts.")
@@ -150,6 +157,7 @@ async def stream_image_form(req: Request, image: UploadFile = File(...), config:
     """通用流式端点：返回完整图片数据，适用于API调用和comicread脚本"""
     img = await image.read()
     conf = Config.parse_raw(config)
+    conf.source_filename = image.filename
     # 标记为通用模式，不使用占位符优化
     conf._web_frontend_optimized = False
     return await while_streaming(req, transform_to_image, conf, img)
@@ -159,6 +167,7 @@ async def stream_image_form_web(req: Request, image: UploadFile = File(...), con
     """Web前端专用端点：使用占位符优化，提供极速体验"""
     img = await image.read()
     conf = Config.parse_raw(config)
+    conf.source_filename = image.filename
     # 标记为Web前端优化模式，使用占位符优化
     conf._web_frontend_optimized = True
     return await while_streaming(req, transform_to_image, conf, img)
@@ -346,6 +355,38 @@ async def list_results():
     except Exception as e:
         raise HTTPException(500, detail=f"Error listing results: {str(e)}")
 
+def _natural_key(value: str):
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", value)]
+
+def _safe_output_name(name: str, fallback: str) -> str:
+    raw = os.path.basename(name or fallback)
+    stem = os.path.splitext(raw)[0] or fallback
+    cleaned = re.sub(r'[\\/:*?"<>|]+', "-", stem).strip().strip(".")
+    return f"{cleaned or fallback}.png"
+
+def _result_output_name(item_path: Path) -> str:
+    metadata_path = item_path / "metadata.json"
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            return _safe_output_name(metadata.get("original_name"), item_path.name)
+        except Exception:
+            pass
+    return _safe_output_name(item_path.name, item_path.name)
+
+def _unique_zip_name(name: str, used_names: set[str]) -> str:
+    if name not in used_names:
+        used_names.add(name)
+        return name
+    stem, ext = os.path.splitext(name)
+    index = 2
+    while True:
+        candidate = f"{stem}-{index}{ext}"
+        if candidate not in used_names:
+            used_names.add(candidate)
+            return candidate
+        index += 1
+
 @app.get("/results/download.zip", tags=["api", "file"])
 async def download_all_results():
     """Download all final translated images as a zip archive"""
@@ -355,14 +396,23 @@ async def download_all_results():
 
     zip_buffer = io.BytesIO()
     count = 0
+    used_names: set[str] = set()
+    result_items = []
+    for item_path in result_dir.iterdir():
+        if not item_path.is_dir():
+            continue
+        final_png_path = item_path / "final.png"
+        if final_png_path.exists() and final_png_path.is_file():
+            output_name = _result_output_name(item_path)
+            result_items.append((output_name, item_path, final_png_path))
+
     with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
-        for item_path in sorted(result_dir.iterdir(), key=lambda path: path.name):
-            if not item_path.is_dir():
-                continue
-            final_png_path = item_path / "final.png"
-            if final_png_path.exists() and final_png_path.is_file():
-                zip_file.write(final_png_path, arcname=f"{item_path.name}.png")
-                count += 1
+        for output_name, item_path, final_png_path in sorted(
+            result_items,
+            key=lambda item: (_natural_key(item[0]), item[1].name),
+        ):
+            zip_file.write(final_png_path, arcname=_unique_zip_name(output_name, used_names))
+            count += 1
 
     if count == 0:
         raise HTTPException(404, detail="No translated images found")

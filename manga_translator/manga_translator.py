@@ -332,8 +332,27 @@ class MangaTranslator:
         self._current_image_context = {
             'subfolder': subfolder_name,
             'file_md5': file_md5,
-            'config': config
+            'config': config,
+            'source_filename': getattr(config, 'source_filename', None),
         }
+
+    def _write_result_metadata(self):
+        if not self._current_image_context:
+            return
+        source_filename = self._current_image_context.get('source_filename')
+        if not source_filename:
+            return
+        metadata = {
+            "original_name": os.path.basename(source_filename),
+            "file_md5": self._current_image_context.get("file_md5"),
+            "subfolder": self._current_image_context.get("subfolder"),
+        }
+        try:
+            metadata_path = self._result_path('metadata.json')
+            with open(metadata_path, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to save result metadata: {e}")
         
     def _get_image_subfolder(self) -> str:
         """获取当前图片的调试子文件夹名"""
@@ -649,6 +668,7 @@ class MangaTranslator:
             if len(final_img.shape) == 3:  # 彩色图片，转换BGR顺序
                 final_img = cv2.cvtColor(final_img, cv2.COLOR_RGB2BGR)
             cv2.imwrite(self._result_path('final.png'), final_img)
+            self._write_result_metadata()
 
             # 通知前端文件已就绪
             if hasattr(self, '_progress_hooks') and self._current_image_context:

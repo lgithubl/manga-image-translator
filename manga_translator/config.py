@@ -332,6 +332,8 @@ class Config(BaseModel):
     # General
     font_path: Optional[str] = None
     """Font file path to use for rendering."""
+    source_filename: Optional[str] = None
+    """Original uploaded filename, used for preserving output names in web downloads."""
     filter_text: Optional[str] = None
     """Filter regions by their text with a regex. Example usage: '.*badtext.*'"""
     render: RenderConfig = RenderConfig()
