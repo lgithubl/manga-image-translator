@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      0.1.2
+// @version      0.1.3
 // @description  Collect manga page images and submit them to a manga-image-translator server.
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -188,10 +188,33 @@
     });
   }
 
-  async function downloadImage(url) {
+  function extensionFromUrlOrType(url, type) {
+    try {
+      const path = new URL(url).pathname;
+      const match = decodeURIComponent(path.split("/").pop() || "").match(/\.(avif|bmp|gif|jpe?g|png|webp)$/i);
+      if (match) return match[0].toLowerCase().replace(".jpeg", ".jpg");
+    } catch (_) {
+      // fall through
+    }
+    if ((type || "").includes("png")) return ".png";
+    if ((type || "").includes("webp")) return ".webp";
+    if ((type || "").includes("bmp")) return ".bmp";
+    if ((type || "").includes("gif")) return ".gif";
+    if ((type || "").includes("avif")) return ".avif";
+    return ".jpg";
+  }
+
+  function queueOutputName(item) {
+    const ordered = state.queue.filter((entry) => entry.status !== "removed");
+    const index = Math.max(0, ordered.findIndex((entry) => entry.id === item.id));
+    const ext = item.outputExt || extensionFromUrlOrType(item.url, "");
+    return `${String(index + 1).padStart(3, "0")}${ext}`;
+  }
+
+  async function downloadImage(item) {
     const response = await gmRequest({
       method: "GET",
-      url,
+      url: item.url,
       responseType: "blob",
       timeout: 120000,
       headers: {
@@ -200,7 +223,10 @@
     });
     const contentType = response.response?.type || response.responseHeaders?.match(/content-type:\s*([^\r\n]+)/i)?.[1] || "image/jpeg";
     const blob = response.response instanceof Blob ? response.response : new Blob([response.response], { type: contentType });
-    return new File([blob], fileNameFromUrl(url), { type: blob.type || contentType });
+    const outputExt = extensionFromUrlOrType(item.url, blob.type || contentType);
+    const outputName = `${String(state.queue.findIndex((entry) => entry.id === item.id) + 1).padStart(3, "0")}${outputExt}`;
+    updateQueueItem(item.id, { outputName, outputExt });
+    return new File([blob], outputName, { type: blob.type || contentType });
   }
 
   function fileNameFromUrl(url) {
@@ -255,7 +281,7 @@
     if (!host) throw new Error("请先填写 manga-image-translator Host。");
 
     updateQueueItem(item.id, { status: "downloading", message: "下载原图中" });
-    const file = await downloadImage(item.url);
+    const file = await downloadImage(item);
 
     updateQueueItem(item.id, { status: "translating", message: "提交翻译中" });
     const form = new FormData();
@@ -279,6 +305,7 @@
       status: "done",
       message: summary.finalFolder ? `完成: ${summary.finalFolder}` : "完成",
       folder: summary.finalFolder,
+      outputName: item.outputName || file.name,
     });
   }
 
@@ -373,33 +400,30 @@
       setMessage("请先填写 Host。");
       return;
     }
-    const url = `${host}/results/download.zip`;
     const headers = authHeader();
     const name = zipDownloadName();
+    const selected = state.queue
+      .filter((item) => item.status === "done" && item.folder)
+      .map((item) => ({
+        folder: item.folder,
+        name: item.outputName || queueOutputName(item),
+      }));
 
-    if (!Object.keys(headers).length && typeof GM_download === "function") {
-      GM_download({
-        url,
-        name,
-        saveAs: true,
-        onload() {
-          setMessage(`已下载 ${name}`);
-        },
-        onerror(error) {
-          setMessage(`下载 ZIP 失败: ${error.error || "unknown error"}，尝试浏览器下载。`);
-          window.open(url, "_blank", "noopener,noreferrer");
-        },
-      });
-      setMessage(`已请求下载 ${name}`);
+    if (!selected.length) {
+      setMessage("当前脚本队列没有已完成结果可下载。");
       return;
     }
 
     try {
       setMessage(`正在下载 ${name}...`);
       const response = await gmRequest({
-        method: "GET",
-        url,
-        headers,
+        method: "POST",
+        url: `${host}/results/download-selected.zip`,
+        headers: {
+          ...headers,
+          "Content-Type": "application/json",
+        },
+        data: JSON.stringify({ results: selected }),
         responseType: "blob",
         timeout: 30 * 60 * 1000,
       });

@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
+from pydantic import BaseModel
 
 from manga_translator import Config
 from server.instance import ExecutorInstance, executor_instances
@@ -35,6 +36,13 @@ BASE_DIR = Path(__file__).resolve().parent
 RESULT_ROOT = (BASE_DIR.parent / "result").resolve()
 FONT_ROOT = (BASE_DIR.parent / "fonts").resolve()
 RESULT_ROOT.mkdir(parents=True, exist_ok=True)
+
+class SelectedResult(BaseModel):
+    folder: str
+    name: str | None = None
+
+class SelectedResultsDownloadRequest(BaseModel):
+    results: list[SelectedResult]
 
 app.add_middleware(
     CORSMiddleware,
@@ -422,6 +430,40 @@ async def download_all_results():
         zip_buffer,
         media_type="application/zip",
         headers={"Content-Disposition": "attachment; filename=manga-translator-results.zip"},
+    )
+
+@app.post("/results/download-selected.zip", tags=["api", "file"])
+async def download_selected_results(data: SelectedResultsDownloadRequest):
+    """Download selected translated images as a zip archive."""
+    if not RESULT_ROOT.exists():
+        raise HTTPException(404, detail="Result directory not found")
+
+    zip_buffer = io.BytesIO()
+    count = 0
+    used_names: set[str] = set()
+    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        for item in data.results:
+            folder = os.path.basename(item.folder or "")
+            if not folder:
+                continue
+            item_path = (RESULT_ROOT / folder).resolve()
+            if RESULT_ROOT not in item_path.parents and item_path != RESULT_ROOT:
+                continue
+            final_png_path = item_path / "final.png"
+            if not final_png_path.exists() or not final_png_path.is_file():
+                continue
+            output_name = _safe_output_name(item.name, folder) if item.name else _result_output_name(item_path)
+            zip_file.write(final_png_path, arcname=_unique_zip_name(output_name, used_names))
+            count += 1
+
+    if count == 0:
+        raise HTTPException(404, detail="No selected translated images found")
+
+    zip_buffer.seek(0)
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=manga-translator-selected-results.zip"},
     )
 
 @app.get("/results/{folder_name}/download.zip", tags=["api", "file"])
