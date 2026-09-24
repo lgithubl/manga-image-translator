@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      0.1.11
+// @version      0.1.12
 // @description  Collect manga page images and submit them to a manga-image-translator server.
 // @match        *://*/*
 // @run-at       document-start
@@ -64,6 +64,7 @@
   let panelFrame;
   let statusTimer;
   let suppressMiniClickUntil = 0;
+  let initialized = false;
   installEarlyPanelShield();
 
   function loadState() {
@@ -106,11 +107,13 @@
   }
 
   function installEarlyPanelShield() {
-    window.addEventListener("mousedown", (event) => {
-      if (!eventTargetsPanel(event)) return;
-      event.stopImmediatePropagation();
-      window.setTimeout(() => ensureTopLayer(true), 0);
-    }, true);
+    ["pointerdown", "mousedown", "mouseup", "click", "auxclick", "touchstart", "touchend"].forEach((type) => {
+      window.addEventListener(type, (event) => {
+        if (!eventTargetsPanel(event)) return;
+        event.stopImmediatePropagation();
+        window.setTimeout(() => ensureTopLayer(true), 0);
+      }, true);
+    });
   }
 
   function absoluteUrl(url) {
@@ -623,8 +626,8 @@
       target.style.right = "auto";
     } else {
       target.style.left = "";
-      target.style.top = "";
-      target.style.right = "";
+      target.style.top = panelFrame ? "72px" : "";
+      target.style.right = panelFrame ? "16px" : "";
     }
   }
 
@@ -656,8 +659,9 @@
       return;
     }
     const width = Math.min(320, Math.max(280, viewportWidth - 16));
+    const top = Number.isFinite(state.panelTop) ? state.panelTop : 72;
     panelFrame.style.width = `${width}px`;
-    panelFrame.style.height = `${Math.min(viewportHeight - 16, Math.max(260, root.scrollHeight || 520))}px`;
+    panelFrame.style.height = `${Math.min(viewportHeight - top - 8, 820)}px`;
   }
 
   function bindMiniDrag() {
@@ -862,7 +866,8 @@
         border-radius: 8px;
         box-shadow: 0 12px 36px rgba(15, 23, 42, 0.22);
         overflow: hidden;
-        max-height: calc(100dvh - 24px);
+        height: 100dvh;
+        max-height: 100dvh;
         display: flex;
         flex-direction: column;
       }
@@ -880,6 +885,7 @@
         gap: 8px;
         padding: 10px;
         min-height: 0;
+        flex: 1;
         overflow-y: auto;
         overscroll-behavior: contain;
       }
@@ -1034,6 +1040,11 @@
   }
 
   function init() {
+    if (initialized) return;
+    const mountTarget = document.body || document.documentElement;
+    if (!mountTarget) return;
+    initialized = true;
+
     panelFrame = document.createElement("iframe");
     panelFrame.id = "mit-submitter-frame";
     panelFrame.setAttribute("title", "Manga Image Translator Submitter");
@@ -1051,7 +1062,7 @@
       background: "transparent",
       colorScheme: "normal",
     });
-    document.body.appendChild(panelFrame);
+    mountTarget.appendChild(panelFrame);
 
     const frameDocument = panelFrame.contentDocument;
     frameDocument.open();
@@ -1075,7 +1086,7 @@
       applyPanelPosition();
     });
     statusTimer = window.setInterval(() => {
-      if (!document.body.contains(panelFrame)) {
+      if (!document.documentElement.contains(panelFrame)) {
         window.clearInterval(statusTimer);
         return;
       }
@@ -1084,9 +1095,18 @@
     }, 30000);
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init, { once: true });
-  } else {
+  function initSoon() {
     init();
+    if (initialized) return;
+    const timer = window.setInterval(() => {
+      init();
+      if (initialized) window.clearInterval(timer);
+    }, 25);
+    document.addEventListener("DOMContentLoaded", () => {
+      init();
+      if (initialized) window.clearInterval(timer);
+    }, { once: true });
   }
+
+  initSoon();
 })();
