@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      0.1.12
-// @description  Collect manga page images and submit them to a manga-image-translator server.
+// @version      1.0.0
+// @description  Collect manga images, submit translations, and provide context-menu translation/TTS helpers.
 // @match        *://*/*
 // @run-at       document-start
+// @noframes
 // @grant        GM_xmlhttpRequest
 // @grant        GM_download
 // @grant        GM_addStyle
@@ -14,6 +15,8 @@
 
 (function () {
   "use strict";
+
+  if (window.top !== window) return;
 
   const STORAGE_KEY = "mit_submitter_state_v1";
   const IMAGE_EXTENSIONS = /\.(avif|bmp|gif|jpe?g|png|webp)(\?|#|$)/i;
@@ -56,20 +59,41 @@
     panelLeft: null,
     panelTop: null,
     popupBlockHosts: {},
+    assistant: {
+      textTranslatePath: "/assistant/translate-text",
+      ttsPath: "/assistant/tts",
+      imageTranslatePath: "/translate/with-form/image/stream/web",
+      textTargetLang: "zh-CN",
+      ttsVoice: "zh-CN",
+      requestJson: "{}",
+      history: [],
+    },
   };
 
   let state = loadState();
   let running = false;
   let root;
   let panelFrame;
+  let contextMenu;
   let statusTimer;
   let suppressMiniClickUntil = 0;
   let initialized = false;
+  let menuContext = { imageUrl: "", text: "" };
+  let activeModalId = "";
+  let contextMenuShownAt = 0;
   installEarlyPanelShield();
 
   function loadState() {
     try {
-      return { ...defaultState, ...JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}") };
+      const loaded = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+      return {
+        ...defaultState,
+        ...loaded,
+        assistant: {
+          ...defaultState.assistant,
+          ...(loaded.assistant || {}),
+        },
+      };
     } catch (_) {
       return { ...defaultState };
     }
@@ -79,6 +103,10 @@
     const persisted = {
       ...state,
       queue: state.queue.slice(-300),
+      assistant: {
+        ...state.assistant,
+        history: (state.assistant?.history || []).slice(-100),
+      },
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
   }
@@ -101,15 +129,23 @@
   }
 
   function eventTargetsPanel(event) {
-    if (!root && !panelFrame) return false;
+    if (!root && !panelFrame && !contextMenu) return false;
     const path = typeof event.composedPath === "function" ? event.composedPath() : [];
-    return path.includes(root) || path.includes(panelFrame) || root?.contains(event.target) || panelFrame?.contains(event.target);
+    return path.includes(root)
+      || path.includes(panelFrame)
+      || path.includes(contextMenu)
+      || root?.contains(event.target)
+      || panelFrame?.contains(event.target)
+      || contextMenu?.contains(event.target);
   }
 
   function installEarlyPanelShield() {
     ["pointerdown", "mousedown", "mouseup", "click", "auxclick", "touchstart", "touchend"].forEach((type) => {
       window.addEventListener(type, (event) => {
         if (!eventTargetsPanel(event)) return;
+        if (contextMenu?.contains(event.target) && type === "click") {
+          runContextMenuAction(event);
+        }
         event.stopImmediatePropagation();
         window.setTimeout(() => ensureTopLayer(true), 0);
       }, true);
@@ -217,6 +253,279 @@
         },
       });
     });
+  }
+
+  function assistantState() {
+    state.assistant = {
+      ...defaultState.assistant,
+      ...(state.assistant || {}),
+    };
+    return state.assistant;
+  }
+
+  function assistantConfigObject() {
+    try {
+      return JSON.parse(assistantState().requestJson || "{}");
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function assistantUrl(path) {
+    const host = normalizeHost(state.host);
+    if (!host) throw new Error("请先填写 Host。");
+    if (/^https?:\/\//i.test(path || "")) return path;
+    return `${host}${String(path || "").startsWith("/") ? "" : "/"}${path || ""}`;
+  }
+
+  function selectedPageText() {
+    return String(window.getSelection?.() || "").trim();
+  }
+
+  function shortText(text, max = 48) {
+    const clean = String(text || "").replace(/\s+/g, " ").trim();
+    return clean.length > max ? `${clean.slice(0, Math.max(0, max - 3))}...` : clean;
+  }
+
+  function safeFileStem(text) {
+    const clean = String(text || "download")
+      .replace(/\.[a-z0-9]+$/i, "")
+      .replace(/[\\/:*?"<>|]+/g, "-")
+      .replace(/\s+/g, " ")
+      .trim();
+    return (clean || "download").slice(0, 80);
+  }
+
+  function assistantTypeLabel(type) {
+    if (type === "image") return "图片";
+    if (type === "audio") return "语音";
+    if (type === "text") return "文本";
+    return "记录";
+  }
+
+  function addAssistantHistory(entry) {
+    const now = Date.now();
+    const next = {
+      id: `${now}-${Math.random().toString(36).slice(2)}`,
+      createdAt: now,
+      status: "done",
+      ...entry,
+    };
+    const assistant = assistantState();
+    assistant.history = [next, ...(assistant.history || [])].slice(0, 100);
+    saveState();
+    render();
+    return next;
+  }
+
+  function updateAssistantHistory(id, patch) {
+    const assistant = assistantState();
+    assistant.history = (assistant.history || []).map((item) => (
+      item.id === id ? { ...item, ...patch, updatedAt: Date.now() } : item
+    ));
+    saveState();
+    render();
+  }
+
+  function removeAssistantHistory(id) {
+    const assistant = assistantState();
+    assistant.history = (assistant.history || []).filter((item) => item.id !== id);
+    if (activeModalId === id) activeModalId = "";
+    saveState();
+    render();
+  }
+
+  function clearAssistantHistory() {
+    if (!window.confirm("清空翻译助手缓存？")) return;
+    assistantState().history = [];
+    activeModalId = "";
+    saveState();
+    render();
+  }
+
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(new Error("Failed to read blob"));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  function extractTextResponse(response) {
+    const contentType = response.responseHeaders?.match(/content-type:\s*([^\r\n]+)/i)?.[1] || "";
+    if (typeof response.response === "object" && response.response && !(response.response instanceof Blob)) {
+      const data = response.response;
+      return String(data.translation || data.translated_text || data.text || data.result || data.output || "");
+    }
+    const raw = String(response.responseText || "");
+    if (contentType.includes("json") || raw.trim().startsWith("{")) {
+      try {
+        const data = JSON.parse(raw);
+        return String(data.translation || data.translated_text || data.text || data.result || data.output || raw);
+      } catch (_) {
+        return raw;
+      }
+    }
+    return raw;
+  }
+
+  async function translateSelectedText(text = selectedPageText()) {
+    if (!text) {
+      setMessage("请先选择文本。");
+      return;
+    }
+    const entry = addAssistantHistory({
+      type: "text",
+      status: "pending",
+      title: shortText(text),
+      sourceText: text,
+      resultText: "",
+      message: "翻译中",
+    });
+    try {
+      const assistant = assistantState();
+      const extra = assistantConfigObject();
+      const response = await gmRequest({
+        method: "POST",
+        url: assistantUrl(assistant.textTranslatePath),
+        headers: {
+          ...authHeader(),
+          "Content-Type": "application/json",
+        },
+        data: JSON.stringify({
+          text,
+          target_lang: assistant.textTargetLang,
+          config: extra,
+          ...extra,
+        }),
+        responseType: "json",
+        timeout: 120000,
+      });
+      updateAssistantHistory(entry.id, {
+        status: "done",
+        resultText: extractTextResponse(response),
+        message: "翻译完成",
+      });
+      setMessage("文本翻译完成。");
+    } catch (error) {
+      updateAssistantHistory(entry.id, { status: "error", message: error.message || String(error) });
+      setMessage(`文本翻译失败: ${error.message || String(error)}`);
+    }
+  }
+
+  async function speakSelectedText(text = selectedPageText()) {
+    if (!text) {
+      setMessage("请先选择文本。");
+      return;
+    }
+    const entry = addAssistantHistory({
+      type: "audio",
+      status: "pending",
+      title: shortText(text),
+      sourceText: text,
+      audioUrl: "",
+      message: "生成语音中",
+    });
+    try {
+      const assistant = assistantState();
+      const extra = assistantConfigObject();
+      const response = await gmRequest({
+        method: "POST",
+        url: assistantUrl(assistant.ttsPath),
+        headers: {
+          ...authHeader(),
+          "Content-Type": "application/json",
+        },
+        data: JSON.stringify({
+          text,
+          voice: assistant.ttsVoice,
+          config: extra,
+          ...extra,
+        }),
+        responseType: "blob",
+        timeout: 180000,
+      });
+      const blob = response.response instanceof Blob
+        ? response.response
+        : new Blob([response.response], { type: "audio/mpeg" });
+      const contentType = blob.type || response.responseHeaders?.match(/content-type:\s*([^\r\n]+)/i)?.[1] || "";
+      if (contentType.includes("json") || contentType.includes("text")) {
+        const textResponse = await blobToText(blob);
+        throw new Error(textResponse || "unexpected TTS response");
+      }
+      updateAssistantHistory(entry.id, {
+        status: "done",
+        audioUrl: await blobToDataUrl(blob),
+        message: "语音完成",
+      });
+      setMessage("语音生成完成。");
+    } catch (error) {
+      updateAssistantHistory(entry.id, { status: "error", message: error.message || String(error) });
+      setMessage(`文本转语音失败: ${error.message || String(error)}`);
+    }
+  }
+
+  async function translateImageUrlNow(url) {
+    const imageUrl = absoluteUrl(url);
+    if (!imageUrl) {
+      setMessage("没有可翻译的图片。");
+      return;
+    }
+    const entry = addAssistantHistory({
+      type: "image",
+      status: "pending",
+      title: shortUrl(imageUrl),
+      sourceUrl: imageUrl,
+      resultUrl: "",
+      folder: "",
+      message: "图片翻译中",
+    });
+    try {
+      const file = await fetchImageFile(imageUrl);
+      const form = new FormData();
+      form.append("image", file);
+      form.append("config", state.configText || "{}");
+      const response = await gmRequest({
+        method: "POST",
+        url: assistantUrl(assistantState().imageTranslatePath),
+        headers: authHeader(),
+        data: form,
+        responseType: "arraybuffer",
+        timeout: 30 * 60 * 1000,
+      });
+      const summary = parseStreamSummary(response.response);
+      if (summary.error) throw new Error(summary.error);
+      const host = normalizeHost(state.host);
+      const resultUrl = summary.finalFolder ? `${host}/result/${encodeURIComponent(summary.finalFolder)}/final.png` : "";
+      updateAssistantHistory(entry.id, {
+        status: "done",
+        folder: summary.finalFolder,
+        resultUrl,
+        message: resultUrl ? "图片翻译完成" : "图片翻译完成，但未返回结果路径",
+      });
+      setMessage("图片翻译完成。");
+    } catch (error) {
+      updateAssistantHistory(entry.id, { status: "error", message: error.message || String(error) });
+      setMessage(`图片翻译失败: ${error.message || String(error)}`);
+    }
+  }
+
+  async function fetchImageFile(url) {
+    const response = await gmRequest({
+      method: "GET",
+      url,
+      responseType: "blob",
+      timeout: 120000,
+      headers: {
+        Referer: location.href,
+      },
+    });
+    const contentType = response.response?.type || response.responseHeaders?.match(/content-type:\s*([^\r\n]+)/i)?.[1] || "image/jpeg";
+    const blob = response.response instanceof Blob ? response.response : new Blob([response.response], { type: contentType });
+    const ext = extensionFromUrlOrType(url, blob.type || contentType);
+    const name = fileNameFromUrl(url, 1).replace(/\.[^.]+$/, ext);
+    return new File([blob], name, { type: blob.type || contentType });
   }
 
   function extensionFromUrlOrType(url, type) {
@@ -580,6 +889,61 @@
     render();
   }
 
+  function renderAssistantModal(item) {
+    const title = item.title || item.sourceText || item.sourceUrl || "助手记录";
+    const message = item.message ? `<div class="mit-modal-message mit-${escapeAttr(item.status || "done")}">${escapeHtml(item.message)}</div>` : "";
+    let content = "";
+    if (item.type === "image") {
+      const result = item.resultUrl
+        ? `<img class="mit-preview-image" src="${escapeAttr(item.resultUrl)}" alt="translated image">
+           <button data-action="downloadAssistantUrl" data-url="${escapeAttr(item.resultUrl)}" data-name="${escapeAttr(`${safeFileStem(title)}.png`)}">下载译图</button>`
+        : `<div class="mit-muted">译图还没有返回。</div>`;
+      content = `
+        <div class="mit-modal-grid">
+          <div>
+            <strong>原图</strong>
+            ${item.sourceUrl ? `<img class="mit-preview-image" src="${escapeAttr(item.sourceUrl)}" alt="source image">
+            <button data-action="downloadAssistantUrl" data-url="${escapeAttr(item.sourceUrl)}" data-name="${escapeAttr(fileNameFromUrl(item.sourceUrl, 1))}">下载原图</button>` : ""}
+          </div>
+          <div>
+            <strong>译图</strong>
+            ${result}
+          </div>
+        </div>
+      `;
+    } else if (item.type === "audio") {
+      content = `
+        <div class="mit-text-block">${escapeHtml(item.sourceText || "")}</div>
+        ${item.audioUrl ? `<audio controls src="${escapeAttr(item.audioUrl)}"></audio>` : '<div class="mit-muted">语音还没有生成。</div>'}
+      `;
+    } else {
+      content = `
+        <div class="mit-modal-grid">
+          <div>
+            <strong>原文</strong>
+            <div class="mit-text-block">${escapeHtml(item.sourceText || "")}</div>
+          </div>
+          <div>
+            <strong>译文</strong>
+            <div class="mit-text-block">${escapeHtml(item.resultText || "")}</div>
+          </div>
+        </div>
+      `;
+    }
+    return `
+      <div class="mit-modal">
+        <div class="mit-modal-panel">
+          <div class="mit-modal-head">
+            <strong>${escapeHtml(assistantTypeLabel(item.type))}: ${escapeHtml(shortText(title, 56))}</strong>
+            <button data-action="closeAssistantModal">关闭</button>
+          </div>
+          ${message}
+          <div class="mit-modal-body">${content}</div>
+        </div>
+      </div>
+    `;
+  }
+
   function bindInput(selector, key, transform = (value) => value) {
     const el = root.querySelector(selector);
     if (!el) return;
@@ -654,8 +1018,8 @@
     const viewportWidth = window.innerWidth || 320;
     const viewportHeight = window.innerHeight || 640;
     if (state.collapsed) {
-      panelFrame.style.width = "64px";
-      panelFrame.style.height = "48px";
+      panelFrame.style.width = "56px";
+      panelFrame.style.height = "56px";
       return;
     }
     const width = Math.min(320, Math.max(280, viewportWidth - 16));
@@ -720,7 +1084,7 @@
     if (!root) return;
     root.classList.toggle("mit-root-collapsed", state.collapsed);
     if (state.collapsed) {
-      root.innerHTML = `<button class="mit-mini-toggle" data-action="toggle">MIT</button>`;
+      root.innerHTML = `<button class="mit-mini-toggle" data-action="toggle" title="翻译助手">译</button>`;
       syncFrameSize();
       applyPanelPosition();
       ensureTopLayer();
@@ -742,11 +1106,24 @@
         <button class="mit-delete" data-action="removeItem" data-id="${escapeAttr(item.id)}">删除</button>
       </div>
     `).join("");
+    const assistant = assistantState();
+    const assistantHistory = (assistant.history || []).map((item) => `
+      <div class="mit-assistant-row" data-action="openAssistantItem" data-id="${escapeAttr(item.id)}" title="${escapeAttr(item.title || item.sourceText || item.sourceUrl || "")}">
+        <span class="mit-kind">${escapeHtml(assistantTypeLabel(item.type))}</span>
+        <span class="mit-assistant-title">${escapeHtml(item.title || item.sourceText || item.sourceUrl || "")}</span>
+        <span class="mit-status mit-${item.status || "done"}">${escapeHtml(item.status || "done")}</span>
+        <button class="mit-delete" data-action="removeAssistantItem" data-id="${escapeAttr(item.id)}">删除</button>
+      </div>
+    `).join("");
+    const activeItem = activeModalId
+      ? (assistant.history || []).find((item) => item.id === activeModalId)
+      : null;
+    const assistantModal = activeItem ? renderAssistantModal(activeItem) : "";
 
     root.innerHTML = `
       <div class="mit-card">
         <div class="mit-head">
-          <strong>MIT Submitter</strong>
+          <strong>翻译助手</strong>
           <button data-action="toggle">收起</button>
         </div>
         <div class="mit-body">
@@ -758,7 +1135,6 @@
           </div>
           <label>ZIP name <input data-field="zipName" value="${escapeAttr(state.zipName)}"></label>
           <label>Image blacklist <input data-field="imageBlacklist" value="${escapeAttr(state.imageBlacklist)}" placeholder="abc123.webp, cover.jpg"></label>
-          <label>Config JSON <textarea data-field="configText" spellcheck="false">${escapeHtml(state.configText)}</textarea></label>
           <div class="mit-actions">
             <button data-action="detect">抓取图片</button>
             <button data-action="translate" ${running ? "disabled" : ""}>翻译队列</button>
@@ -772,9 +1148,28 @@
           </div>
           <div class="mit-summary">${escapeHtml(statusText())}</div>
           <div class="mit-message">${escapeHtml(state.lastMessage || "")}</div>
+          <div class="mit-helper-head"><strong>批量队列</strong></div>
           <div class="mit-list">${queuePreview || '<div class="mit-muted">还没有图片。点击“抓取图片”累计当前页图片。</div>'}</div>
+          <div class="mit-helper-head">
+            <strong>助手缓存</strong>
+            <button data-action="clearAssistantHistory">清空</button>
+          </div>
+          <div class="mit-assistant-list">${assistantHistory || '<div class="mit-muted">右键图片或选中文本后使用翻译助手。</div>'}</div>
+          <details class="mit-section">
+            <summary>翻译参数</summary>
+            <label>Config JSON <textarea data-field="configText" spellcheck="false">${escapeHtml(state.configText)}</textarea></label>
+            <label>图片翻译接口 <input data-assistant-field="imageTranslatePath" value="${escapeAttr(assistant.imageTranslatePath)}"></label>
+            <label>文本翻译接口 <input data-assistant-field="textTranslatePath" value="${escapeAttr(assistant.textTranslatePath)}"></label>
+            <label>TTS 接口 <input data-assistant-field="ttsPath" value="${escapeAttr(assistant.ttsPath)}"></label>
+            <div class="mit-grid">
+              <label>目标语言 <input data-assistant-field="textTargetLang" value="${escapeAttr(assistant.textTargetLang)}"></label>
+              <label>TTS Voice <input data-assistant-field="ttsVoice" value="${escapeAttr(assistant.ttsVoice)}"></label>
+            </div>
+            <label>助手请求 JSON <textarea data-assistant-field="requestJson" spellcheck="false">${escapeHtml(assistant.requestJson)}</textarea></label>
+          </details>
         </div>
       </div>
+      ${assistantModal}
     `;
     syncFrameSize();
     applyPanelPosition();
@@ -795,6 +1190,18 @@
     root.querySelectorAll('[data-action="removeItem"]').forEach((el) => {
       el.addEventListener("click", () => removeQueueItem(el.dataset.id));
     });
+    root.querySelectorAll('[data-action="openAssistantItem"]').forEach((el) => {
+      el.addEventListener("click", () => {
+        activeModalId = el.dataset.id;
+        render();
+      });
+    });
+    root.querySelectorAll('[data-action="removeAssistantItem"]').forEach((el) => {
+      el.addEventListener("click", (event) => {
+        event.stopPropagation();
+        removeAssistantHistory(el.dataset.id);
+      });
+    });
     bindInput('[data-field="host"]', "host", normalizeHost);
     bindInput('[data-field="useBasicAuth"]', "useBasicAuth");
     bindInput('[data-field="username"]', "username");
@@ -802,6 +1209,29 @@
     bindInput('[data-field="zipName"]', "zipName");
     bindInput('[data-field="imageBlacklist"]', "imageBlacklist");
     bindInput('[data-field="configText"]', "configText");
+    root.querySelectorAll("[data-assistant-field]").forEach((el) => {
+      el.addEventListener("change", () => {
+        assistantState()[el.dataset.assistantField] = el.value;
+        saveState();
+        render();
+      });
+    });
+    button('[data-action="clearAssistantHistory"]', clearAssistantHistory);
+    button('[data-action="closeAssistantModal"]', () => {
+      activeModalId = "";
+      render();
+    });
+    root.querySelectorAll('[data-action="downloadAssistantUrl"]').forEach((el) => {
+      el.addEventListener("click", () => {
+        const url = el.dataset.url || "";
+        if (!url) return;
+        GM_download({
+          url,
+          name: el.dataset.name || `${safeFileStem(activeItem?.title || "assistant-download")}.png`,
+          headers: authHeader(),
+        });
+      });
+    });
   }
 
   function shortUrl(url) {
@@ -893,13 +1323,15 @@
         display: none;
       }
       #mit-submitter-root .mit-mini-toggle {
-        min-width: 48px;
-        min-height: 36px;
-        padding: 7px 10px;
-        border-radius: 999px;
+        width: 52px;
+        height: 52px;
+        padding: 0;
+        border-radius: 50%;
         box-shadow: 0 10px 28px rgba(15, 23, 42, 0.22);
         touch-action: none;
         user-select: none;
+        font-size: 18px;
+        line-height: 1;
       }
       #mit-submitter-root label {
         display: grid;
@@ -963,9 +1395,64 @@
       #mit-submitter-root .mit-list {
         display: grid;
         gap: 4px;
+        min-height: min(126px, 22dvh);
         max-height: min(260px, 34dvh);
         overflow: auto;
         overscroll-behavior: contain;
+      }
+      #mit-submitter-root .mit-section {
+        display: grid;
+        gap: 8px;
+        padding: 8px;
+        border: 1px solid #dbe3ea;
+        border-radius: 8px;
+        background: #fff;
+      }
+      #mit-submitter-root .mit-section summary {
+        cursor: pointer;
+        font-weight: 700;
+      }
+      #mit-submitter-root .mit-helper-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      #mit-submitter-root .mit-helper-head button {
+        padding: 4px 7px;
+        font-size: 12px;
+      }
+      #mit-submitter-root .mit-assistant-list {
+        display: grid;
+        gap: 4px;
+        min-height: min(70px, 14dvh);
+        max-height: min(210px, 28dvh);
+        overflow: auto;
+        overscroll-behavior: contain;
+      }
+      #mit-submitter-root .mit-assistant-row {
+        display: grid;
+        grid-template-columns: 42px minmax(0, 1fr) 66px 48px;
+        gap: 6px;
+        align-items: center;
+        min-height: 28px;
+        padding: 4px 6px;
+        border: 1px solid #dbe3ea;
+        border-radius: 6px;
+        background: white;
+        cursor: pointer;
+      }
+      #mit-submitter-root .mit-assistant-title {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #mit-submitter-root .mit-kind {
+        border-radius: 999px;
+        padding: 2px 6px;
+        background: #f1f5f9;
+        color: #334155;
+        text-align: center;
       }
       #mit-submitter-root .mit-row {
         display: grid;
@@ -1007,9 +1494,85 @@
         color: #991b1b;
       }
       #mit-submitter-root .mit-translating,
-      #mit-submitter-root .mit-downloading {
+      #mit-submitter-root .mit-downloading,
+      #mit-submitter-root .mit-pending {
         background: #dbeafe;
         color: #1d4ed8;
+      }
+      #mit-submitter-root .mit-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 12px;
+        background: rgba(15, 23, 42, 0.38);
+      }
+      #mit-submitter-root .mit-modal-panel {
+        width: min(100%, 760px);
+        max-height: calc(100dvh - 24px);
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 10px;
+        border: 1px solid #b8c2cc;
+        border-radius: 8px;
+        background: #f8fafc;
+        box-shadow: 0 20px 56px rgba(15, 23, 42, 0.3);
+      }
+      #mit-submitter-root .mit-modal-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      #mit-submitter-root .mit-modal-head strong {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #mit-submitter-root .mit-modal-body {
+        min-height: 0;
+        overflow: auto;
+      }
+      #mit-submitter-root .mit-modal-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      #mit-submitter-root .mit-modal-grid > div {
+        min-width: 0;
+        display: grid;
+        gap: 6px;
+        align-content: start;
+      }
+      #mit-submitter-root .mit-preview-image {
+        width: 100%;
+        max-height: 58dvh;
+        object-fit: contain;
+        border: 1px solid #dbe3ea;
+        border-radius: 6px;
+        background: white;
+      }
+      #mit-submitter-root .mit-text-block {
+        max-height: 52dvh;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        padding: 8px;
+        border: 1px solid #dbe3ea;
+        border-radius: 6px;
+        background: white;
+      }
+      #mit-submitter-root audio {
+        width: 100%;
+      }
+      #mit-submitter-root .mit-modal-message {
+        padding: 6px 8px;
+        border-radius: 6px;
+        background: #e2e8f0;
       }
       @media (max-width: 520px), (max-height: 680px) {
         #mit-submitter-root {
@@ -1028,6 +1591,12 @@
         #mit-submitter-root .mit-list {
           max-height: 32dvh;
         }
+        #mit-submitter-root .mit-assistant-row {
+          grid-template-columns: 38px minmax(0, 1fr) 56px 44px;
+        }
+        #mit-submitter-root .mit-modal-grid {
+          grid-template-columns: 1fr;
+        }
       }
     `;
     if (targetDocument === document && typeof GM_addStyle === "function") {
@@ -1039,11 +1608,150 @@
     targetDocument.head.appendChild(style);
   }
 
+  function installOuterStyles() {
+    if (document.getElementById("mit-submitter-outer-style")) return;
+    const style = document.createElement("style");
+    style.id = "mit-submitter-outer-style";
+    style.textContent = `
+      #mit-submitter-frame {
+        pointer-events: auto !important;
+      }
+      #mit-context-menu {
+        position: fixed;
+        z-index: 2147483647;
+        display: none;
+        min-width: 148px;
+        padding: 6px;
+        background: #f8fafc;
+        color: #172026;
+        border: 1px solid #b8c2cc;
+        border-radius: 8px;
+        box-shadow: 0 14px 36px rgba(15, 23, 42, 0.24);
+        font: 13px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      #mit-context-menu button {
+        display: block;
+        width: 100%;
+        border: 0;
+        border-radius: 6px;
+        padding: 7px 9px;
+        background: transparent;
+        color: #172026;
+        text-align: left;
+        cursor: pointer;
+        font: inherit;
+      }
+      #mit-context-menu button:hover,
+      #mit-context-menu button:focus {
+        background: #e2e8f0;
+        outline: none;
+      }
+      #mit-context-menu .mit-menu-sep {
+        height: 1px;
+        margin: 5px 3px;
+        background: #dbe3ea;
+      }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function ensureContextMenu() {
+    if (contextMenu && document.documentElement.contains(contextMenu)) return contextMenu;
+    installOuterStyles();
+    contextMenu = document.createElement("div");
+    contextMenu.id = "mit-context-menu";
+    contextMenu.setAttribute("role", "menu");
+    contextMenu.innerHTML = `
+      <button type="button" role="menuitem" data-menu-action="translateImage">发送翻译</button>
+      <div class="mit-menu-sep" data-menu-image-sep></div>
+      <button type="button" role="menuitem" data-menu-action="translateText">翻译中文</button>
+      <button type="button" role="menuitem" data-menu-action="speakText">文本转语音</button>
+    `;
+    (document.body || document.documentElement).appendChild(contextMenu);
+    ["pointerdown", "mousedown", "mouseup", "click", "auxclick", "touchstart", "touchend", "contextmenu"].forEach((type) => {
+      contextMenu.addEventListener(type, (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }, true);
+    });
+    contextMenu.addEventListener("click", runContextMenuAction);
+    return contextMenu;
+  }
+
+  function runContextMenuAction(event) {
+    const buttonEl = event.target?.closest?.("[data-menu-action]");
+    if (!buttonEl || buttonEl.style.display === "none") return;
+    event.preventDefault();
+    const action = buttonEl.dataset.menuAction;
+    const context = { ...menuContext };
+    hideContextMenu();
+    if (action === "translateImage") translateImageUrlNow(context.imageUrl);
+    if (action === "translateText") translateSelectedText(context.text);
+    if (action === "speakText") speakSelectedText(context.text);
+  }
+
+  function showContextMenu(event, context) {
+    const menu = ensureContextMenu();
+    menuContext = {
+      imageUrl: context.imageUrl || "",
+      text: context.text || "",
+    };
+    const imageButton = menu.querySelector('[data-menu-action="translateImage"]');
+    const imageSep = menu.querySelector("[data-menu-image-sep]");
+    const textButtons = menu.querySelectorAll('[data-menu-action="translateText"], [data-menu-action="speakText"]');
+    imageButton.style.display = menuContext.imageUrl ? "block" : "none";
+    imageSep.style.display = menuContext.imageUrl && menuContext.text ? "block" : "none";
+    textButtons.forEach((buttonEl) => {
+      buttonEl.style.display = menuContext.text ? "block" : "none";
+    });
+    menu.style.display = "block";
+    contextMenuShownAt = Date.now();
+    menu.style.left = "0px";
+    menu.style.top = "0px";
+    const rect = menu.getBoundingClientRect();
+    const margin = 8;
+    const left = Math.min(Math.max(margin, event.clientX), Math.max(margin, window.innerWidth - rect.width - margin));
+    const top = Math.min(Math.max(margin, event.clientY), Math.max(margin, window.innerHeight - rect.height - margin));
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+  }
+
+  function hideContextMenu() {
+    if (!contextMenu) return;
+    contextMenu.style.display = "none";
+    menuContext = { imageUrl: "", text: "" };
+  }
+
+  function installContextMenu() {
+    window.addEventListener("contextmenu", (event) => {
+      if (eventTargetsPanel(event)) return;
+      const target = event.target;
+      const image = target?.closest?.("img");
+      const imageUrl = image ? imageUrlFromElement(image) : "";
+      const text = selectedPageText();
+      if (!imageUrl && !text) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      showContextMenu(event, { imageUrl, text });
+      ensureTopLayer(true);
+    }, true);
+    ["pointerdown", "click", "keydown", "scroll", "resize"].forEach((type) => {
+      window.addEventListener(type, (event) => {
+        if (type === "keydown" && event.key !== "Escape") return;
+        if (eventTargetsPanel(event)) return;
+        if (Date.now() - contextMenuShownAt < 250) return;
+        hideContextMenu();
+      }, true);
+    });
+  }
+
   function init() {
     if (initialized) return;
     const mountTarget = document.body || document.documentElement;
     if (!mountTarget) return;
     initialized = true;
+    installOuterStyles();
 
     panelFrame = document.createElement("iframe");
     panelFrame.id = "mit-submitter-frame";
@@ -1109,4 +1817,5 @@
   }
 
   initSoon();
+  installContextMenu();
 })();
