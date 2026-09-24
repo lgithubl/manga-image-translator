@@ -7,6 +7,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import zipfile
 from argparse import Namespace
 import asyncio
@@ -35,7 +36,9 @@ nonce = None
 BASE_DIR = Path(__file__).resolve().parent
 RESULT_ROOT = (BASE_DIR.parent / "result").resolve()
 FONT_ROOT = (BASE_DIR.parent / "fonts").resolve()
+DOWNLOAD_ROOT = (RESULT_ROOT / "_downloads").resolve()
 RESULT_ROOT.mkdir(parents=True, exist_ok=True)
+DOWNLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 
 class SelectedResult(BaseModel):
     folder: str
@@ -43,6 +46,7 @@ class SelectedResult(BaseModel):
 
 class SelectedResultsDownloadRequest(BaseModel):
     results: list[SelectedResult]
+    filename: str | None = None
 
 app.add_middleware(
     CORSMiddleware,
@@ -395,6 +399,31 @@ def _unique_zip_name(name: str, used_names: set[str]) -> str:
             return candidate
         index += 1
 
+def _safe_download_filename(name: str | None, fallback: str) -> str:
+    raw = os.path.basename(name or fallback)
+    cleaned = re.sub(r'[\\/:*?"<>|]+', "-", raw).strip().strip(".")
+    base = cleaned or fallback
+    return base if base.lower().endswith(".zip") else f"{base}.zip"
+
+def _write_selected_results_zip(zip_target, results: list[SelectedResult]) -> int:
+    count = 0
+    used_names: set[str] = set()
+    with zipfile.ZipFile(zip_target, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        for item in results:
+            folder = os.path.basename(item.folder or "")
+            if not folder:
+                continue
+            item_path = (RESULT_ROOT / folder).resolve()
+            if RESULT_ROOT not in item_path.parents and item_path != RESULT_ROOT:
+                continue
+            final_png_path = item_path / "final.png"
+            if not final_png_path.exists() or not final_png_path.is_file():
+                continue
+            output_name = _safe_output_name(item.name, folder) if item.name else _result_output_name(item_path)
+            zip_file.write(final_png_path, arcname=_unique_zip_name(output_name, used_names))
+            count += 1
+    return count
+
 @app.get("/results/download.zip", tags=["api", "file"])
 async def download_all_results():
     """Download all final translated images as a zip archive"""
@@ -439,22 +468,7 @@ async def download_selected_results(data: SelectedResultsDownloadRequest):
         raise HTTPException(404, detail="Result directory not found")
 
     zip_buffer = io.BytesIO()
-    count = 0
-    used_names: set[str] = set()
-    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
-        for item in data.results:
-            folder = os.path.basename(item.folder or "")
-            if not folder:
-                continue
-            item_path = (RESULT_ROOT / folder).resolve()
-            if RESULT_ROOT not in item_path.parents and item_path != RESULT_ROOT:
-                continue
-            final_png_path = item_path / "final.png"
-            if not final_png_path.exists() or not final_png_path.is_file():
-                continue
-            output_name = _safe_output_name(item.name, folder) if item.name else _result_output_name(item_path)
-            zip_file.write(final_png_path, arcname=_unique_zip_name(output_name, used_names))
-            count += 1
+    count = _write_selected_results_zip(zip_buffer, data.results)
 
     if count == 0:
         raise HTTPException(404, detail="No selected translated images found")
@@ -464,6 +478,52 @@ async def download_selected_results(data: SelectedResultsDownloadRequest):
         zip_buffer,
         media_type="application/zip",
         headers={"Content-Disposition": "attachment; filename=manga-translator-selected-results.zip"},
+    )
+
+@app.post("/results/prepare-selected-download", tags=["api", "file"])
+async def prepare_selected_results_download(data: SelectedResultsDownloadRequest):
+    """Prepare selected translated images as a disk-backed zip for native browser download."""
+    if not RESULT_ROOT.exists():
+        raise HTTPException(404, detail="Result directory not found")
+
+    DOWNLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - 6 * 60 * 60
+    for old_file in DOWNLOAD_ROOT.glob("*.zip"):
+        try:
+            if old_file.stat().st_mtime < cutoff:
+                old_file.unlink()
+        except OSError:
+            pass
+
+    token = secrets.token_urlsafe(18)
+    download_name = _safe_download_filename(data.filename, "manga-translator-selected-results.zip")
+    zip_path = DOWNLOAD_ROOT / f"{token}.zip"
+    count = _write_selected_results_zip(zip_path, data.results)
+    if count == 0:
+        try:
+            zip_path.unlink()
+        except OSError:
+            pass
+        raise HTTPException(404, detail="No selected translated images found")
+
+    return {
+        "url": f"/results/downloads/{token}",
+        "filename": download_name,
+        "count": count,
+        "size": zip_path.stat().st_size,
+    }
+
+@app.get("/results/downloads/{token}", tags=["api", "file"])
+async def download_prepared_results(token: str):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", token):
+        raise HTTPException(404, detail="Download not found")
+    zip_path = (DOWNLOAD_ROOT / f"{token}.zip").resolve()
+    if DOWNLOAD_ROOT not in zip_path.parents or not zip_path.exists() or not zip_path.is_file():
+        raise HTTPException(404, detail="Download not found")
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename="manga-translator-selected-results.zip",
     )
 
 @app.get("/results/{folder_name}/download.zip", tags=["api", "file"])

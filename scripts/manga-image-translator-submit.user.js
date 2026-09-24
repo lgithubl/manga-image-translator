@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      0.1.7
+// @version      0.1.8
 // @description  Collect manga page images and submit them to a manga-image-translator server.
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -45,6 +45,7 @@
     username: "",
     password: "",
     zipName: "manga-translator-results.zip",
+    imageBlacklist: "",
     configText: JSON.stringify(DEFAULT_CONFIG, null, 2),
     queue: [],
     resultsCount: 0,
@@ -153,8 +154,13 @@
     const urls = detectImages();
     const known = new Set(state.queue.map((item) => item.url));
     let added = 0;
+    let skipped = 0;
     for (const url of urls) {
       if (known.has(url)) continue;
+      if (isBlacklistedImageUrl(url)) {
+        skipped += 1;
+        continue;
+      }
       state.queue.push({
         id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         url,
@@ -167,7 +173,7 @@
       added += 1;
     }
     saveState();
-    setMessage(`检测到 ${urls.length} 张图，新增 ${added} 张。`);
+    setMessage(`检测到 ${urls.length} 张图，新增 ${added} 张，黑名单跳过 ${skipped} 张。`);
   }
 
   function gmRequest(options) {
@@ -261,11 +267,30 @@
     return `image-${String(fallbackIndex).padStart(3, "0")}.jpg`;
   }
 
+  function blacklistNames() {
+    return String(state.imageBlacklist || "")
+      .split(",")
+      .map((name) => name.trim().toLowerCase())
+      .filter(Boolean);
+  }
+
+  function isBlacklistedImageUrl(url) {
+    const name = fileNameFromUrl(url, 1).toLowerCase();
+    const stem = name.replace(/\.[^.]+$/, "");
+    return blacklistNames().some((blocked) => blocked === name || blocked === stem);
+  }
+
   function updateQueueItem(id, patch) {
     state.queue = state.queue.map((item) => {
       if (item.id !== id) return item;
       return { ...item, ...patch, updatedAt: Date.now() };
     });
+    saveState();
+    render();
+  }
+
+  function removeQueueItem(id) {
+    state.queue = state.queue.filter((item) => item.id !== id);
     saveState();
     render();
   }
@@ -407,6 +432,23 @@
     setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
   }
 
+  function gmDownloadFile(options) {
+    return new Promise((resolve, reject) => {
+      GM_download({
+        ...options,
+        onload() {
+          resolve();
+        },
+        onerror(error) {
+          reject(new Error(error?.error || error?.details || "download failed"));
+        },
+        ontimeout() {
+          reject(new Error("Download timeout"));
+        },
+      });
+    });
+  }
+
   async function blobToText(blob) {
     try {
       return await blob.text();
@@ -436,7 +478,42 @@
     }
 
     try {
+      setMessage(`正在准备 ${name}...`);
+      const prepareResponse = await gmRequest({
+        method: "POST",
+        url: `${host}/results/prepare-selected-download`,
+        headers: {
+          ...headers,
+          "Content-Type": "application/json",
+        },
+        data: JSON.stringify({ results: selected, filename: name }),
+        responseType: "json",
+        timeout: 30 * 60 * 1000,
+      });
+      const prepared = typeof prepareResponse.response === "object" && prepareResponse.response
+        ? prepareResponse.response
+        : JSON.parse(prepareResponse.responseText || "{}");
+      const downloadUrl = new URL(prepared.url, `${host}/`).href;
       setMessage(`正在下载 ${name}...`);
+      await gmDownloadFile({
+        url: downloadUrl,
+        name,
+        headers,
+        timeout: 30 * 60 * 1000,
+      });
+      setMessage(`已开始下载 ${name}`);
+    } catch (prepareError) {
+      try {
+        setMessage(`原生下载不可用，正在兼容下载 ${name}...`);
+        await downloadZipAsBlob(host, headers, selected, name);
+        setMessage(`已下载 ${name}`);
+      } catch (blobError) {
+        setMessage(`下载 ZIP 失败: ${blobError.message || prepareError.message || String(blobError)}`);
+      }
+    }
+  }
+
+  async function downloadZipAsBlob(host, headers, selected, name) {
       const response = await gmRequest({
         method: "POST",
         url: `${host}/results/download-selected.zip`,
@@ -460,10 +537,6 @@
         throw new Error(text || `unexpected response type: ${contentType}`);
       }
       saveBlob(blob, name);
-      setMessage(`已下载 ${name}`);
-    } catch (error) {
-      setMessage(`下载 ZIP 失败: ${error.message || String(error)}`);
-    }
   }
 
   function clearDone() {
@@ -622,6 +695,7 @@
         <span>${index + 1}</span>
         <span class="mit-status mit-${item.status}">${escapeHtml(item.status)}</span>
         <span>${escapeHtml(item.message || shortUrl(item.url))}</span>
+        <button class="mit-delete" data-action="removeItem" data-id="${escapeAttr(item.id)}">删除</button>
       </div>
     `).join("");
 
@@ -639,6 +713,7 @@
             <label>Pass <input data-field="password" type="password" value="${escapeAttr(state.password)}"></label>
           </div>
           <label>ZIP name <input data-field="zipName" value="${escapeAttr(state.zipName)}"></label>
+          <label>Image blacklist <input data-field="imageBlacklist" value="${escapeAttr(state.imageBlacklist)}" placeholder="abc123.webp, cover.jpg"></label>
           <label>Config JSON <textarea data-field="configText" spellcheck="false">${escapeHtml(state.configText)}</textarea></label>
           <div class="mit-actions">
             <button data-action="detect">抓取图片</button>
@@ -672,11 +747,15 @@
     button('[data-action="retry"]', retryErrors);
     button('[data-action="clearDone"]', clearDone);
     button('[data-action="clearQueue"]', clearQueue);
+    root.querySelectorAll('[data-action="removeItem"]').forEach((el) => {
+      el.addEventListener("click", () => removeQueueItem(el.dataset.id));
+    });
     bindInput('[data-field="host"]', "host", normalizeHost);
     bindInput('[data-field="useBasicAuth"]', "useBasicAuth");
     bindInput('[data-field="username"]', "username");
     bindInput('[data-field="password"]', "password");
     bindInput('[data-field="zipName"]', "zipName");
+    bindInput('[data-field="imageBlacklist"]', "imageBlacklist");
     bindInput('[data-field="configText"]', "configText");
   }
 
@@ -839,7 +918,7 @@
       }
       #mit-submitter-root .mit-row {
         display: grid;
-        grid-template-columns: 24px 82px minmax(0, 1fr);
+        grid-template-columns: 22px 72px minmax(0, 1fr) 48px;
         gap: 6px;
         align-items: center;
         min-height: 26px;
@@ -852,6 +931,15 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      #mit-submitter-root .mit-row > span:nth-child(3) {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #mit-submitter-root .mit-delete {
+        padding: 4px 5px;
+        font-size: 12px;
       }
       #mit-submitter-root .mit-status {
         border-radius: 999px;
