@@ -168,12 +168,12 @@
                 data-icon="carbon:chevron-down"
               ></i>
             </div>
-            <span
-              class="text-xs"
-              :class="codexAuthStatus.authenticated ? 'text-green-700' : 'text-gray-500'"
-            >
-              {{ codexAuthStatus.authenticated ? 'Codex ready' : 'Codex not logged in' }}
-            </span>
+          <span
+            class="text-xs"
+            :class="codexAuthStatus.authenticated ? 'text-green-700' : 'text-gray-500'"
+          >
+              {{ translator === 'custom_openai' ? (codexAuthStatus.authenticated ? 'Codex ready' : 'Codex not logged in') : 'Codex idle' }}
+          </span>
           </div>
 
           <!-- Target Language -->
@@ -1016,7 +1016,7 @@
           window.addEventListener("paste", this.onpaste);
           this.loadSettings();
           this.loadFonts();
-          this.loadCodexAuthStatus();
+          this.updateCodexStateForTranslator();
           this.loadFinishedImages();
           // Sync gallery with results folder on page load
           setTimeout(() => {
@@ -1113,6 +1113,7 @@
         codexModels: [],
         codexModel: "auto",
         codexModelsLoading: false,
+        lastCodexTranslatorState: null,
         codexAuthStatus: {
           authenticated: false,
           auth_path: "",
@@ -1162,6 +1163,9 @@
         // Settings change handlers for auto-saving
         onSettingChange() {
           this.saveSettings();
+          if (this.translator !== this.lastCodexTranslatorState) {
+            this.updateCodexStateForTranslator();
+          }
         },
 
         // Settings persistence
@@ -1310,7 +1314,28 @@
           this.saveSettings();
         },
 
+        clearCodexPolling() {
+          if (this.codexAuthPollTimer) {
+            clearInterval(this.codexAuthPollTimer);
+            this.codexAuthPollTimer = null;
+          }
+          this.codexAuthLoading = false;
+          this.codexDevice = {};
+        },
+
+        async updateCodexStateForTranslator() {
+          this.lastCodexTranslatorState = this.translator;
+          if (this.translator !== "custom_openai") {
+            this.clearCodexPolling();
+            this.codexAuthMessage = "";
+            this.codexModelsLoading = false;
+            return;
+          }
+          await this.loadCodexAuthStatus();
+        },
+
         async loadCodexAuthStatus() {
+          if (this.translator !== "custom_openai") return;
           try {
             const response = await fetch(`${BASE_URI}codex-auth/status`);
             if (response.ok) {
@@ -1325,6 +1350,7 @@
         },
 
         async loadCodexModels() {
+          if (this.translator !== "custom_openai") return;
           this.codexModelsLoading = true;
           try {
             const response = await fetch(`${BASE_URI}v1/models`);
@@ -1354,13 +1380,15 @@
         async useCodexTranslator() {
           this.translator = "custom_openai";
           this.saveSettings();
-          await this.loadCodexAuthStatus();
+          await this.updateCodexStateForTranslator();
           this.codexAuthMessage = this.codexAuthStatus.authenticated
             ? "custom_openai is now routed through the built-in Codex relay."
             : "custom_openai selected. Login Codex before translating.";
         },
 
         async startCodexAuth() {
+          this.translator = "custom_openai";
+          this.saveSettings();
           this.codexAuthLoading = true;
           this.codexAuthMessage = "Requesting Codex device code...";
           this.codexDevice = {};
@@ -1395,8 +1423,12 @@
                   this.codexAuthLoading = false;
                   this.codexDevice = {};
                   this.codexAuthStatus = data;
-                  this.codexAuthMessage = "Codex login completed. You can translate with custom_openai now.";
-                  await this.useCodexTranslator();
+                  if (this.translator === "custom_openai") {
+                    this.codexAuthMessage = "Codex login completed. You can translate with custom_openai now.";
+                    await this.useCodexTranslator();
+                  } else {
+                    this.codexAuthMessage = "";
+                  }
                 }
               } catch (error) {
                 clearInterval(this.codexAuthPollTimer);
