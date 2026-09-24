@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      0.1.6
+// @version      0.1.7
 // @description  Collect manga page images and submit them to a manga-image-translator server.
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -535,6 +535,20 @@
     }
   }
 
+  function ensureTopLayer(forceToFront = false) {
+    if (!root || typeof root.showPopover !== "function") return;
+    try {
+      if (forceToFront && root.matches(":popover-open")) {
+        root.hidePopover();
+      }
+      if (!root.matches(":popover-open")) {
+        root.showPopover();
+      }
+    } catch (_) {
+      // Some pages/browsers can reject popover while the document is inactive.
+    }
+  }
+
   function bindMiniDrag() {
     const el = root?.querySelector(".mit-mini-toggle");
     if (!el) return;
@@ -592,6 +606,7 @@
     if (state.collapsed) {
       root.innerHTML = `<button class="mit-mini-toggle" data-action="toggle">MIT</button>`;
       applyPanelPosition();
+      ensureTopLayer();
       bindMiniDrag();
       button('[data-action="toggle"]', () => {
         if (Date.now() < suppressMiniClickUntil) return;
@@ -643,6 +658,7 @@
       </div>
     `;
     applyPanelPosition();
+    ensureTopLayer();
 
     button('[data-action="toggle"]', () => {
       state.collapsed = true;
@@ -700,6 +716,14 @@
         color: #172026;
         font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         font-size: 13px;
+      }
+      #mit-submitter-root[popover] {
+        border: 0;
+        padding: 0;
+        margin: 0;
+        background: transparent;
+        overflow: visible;
+        inset: auto;
       }
       #mit-submitter-root * {
         box-sizing: border-box;
@@ -875,12 +899,21 @@
     installStyles();
     root = document.createElement("div");
     root.id = "mit-submitter-root";
+    if (typeof root.showPopover === "function") {
+      root.setAttribute("popover", "manual");
+    }
     document.body.appendChild(root);
     render();
+    window.addEventListener("pointerdown", (event) => {
+      if (root.contains(event.target)) return;
+      window.setTimeout(() => ensureTopLayer(true), 0);
+    }, true);
     statusTimer = window.setInterval(() => {
       if (!document.body.contains(root)) {
         window.clearInterval(statusTimer);
+        return;
       }
+      ensureTopLayer();
     }, 30000);
   }
 
