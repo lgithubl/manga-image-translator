@@ -631,9 +631,6 @@
   function ensureTopLayer(forceToFront = false) {
     if (panelFrame) {
       panelFrame.style.zIndex = "2147483647";
-      if (forceToFront && panelFrame.parentNode) {
-        panelFrame.parentNode.appendChild(panelFrame);
-      }
       return;
     }
     if (!root || typeof root.showPopover !== "function") return;
