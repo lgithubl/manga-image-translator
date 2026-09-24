@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      0.1.8
+// @version      0.1.9
 // @description  Collect manga page images and submit them to a manga-image-translator server.
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_download
 // @grant        GM_addStyle
+// @grant        unsafeWindow
 // @connect      *
 // ==/UserScript==
 
@@ -53,6 +54,7 @@
     collapsed: false,
     panelLeft: null,
     panelTop: null,
+    popupBlockHosts: {},
   };
 
   let state = loadState();
@@ -60,6 +62,8 @@
   let root;
   let statusTimer;
   let suppressMiniClickUntil = 0;
+  let lastPopupBlockNotice = 0;
+  let popupBlockEventsInstalled = false;
 
   function loadState() {
     try {
@@ -92,6 +96,34 @@
     state.lastMessage = message;
     saveState();
     render();
+  }
+
+  function currentHostKey() {
+    return location.host.toLowerCase();
+  }
+
+  function popupBlockEnabled() {
+    return Boolean(state.popupBlockHosts?.[currentHostKey()]);
+  }
+
+  function setPopupBlockEnabled(enabled) {
+    state.popupBlockHosts = {
+      ...(state.popupBlockHosts || {}),
+      [currentHostKey()]: Boolean(enabled),
+    };
+    saveState();
+    render();
+  }
+
+  function notePopupBlocked() {
+    const now = Date.now();
+    if (now - lastPopupBlockNotice < 1200) return;
+    lastPopupBlockNotice = now;
+    setMessage(`已拦截 ${currentHostKey()} 的弹窗。`);
+  }
+
+  function pageWindow() {
+    return typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
   }
 
   function absoluteUrl(url) {
@@ -622,6 +654,56 @@
     }
   }
 
+  function installPopupBlocker() {
+    const targetWindow = pageWindow();
+    if (targetWindow.open && !targetWindow.open.__mitSubmitterWrapper) {
+      const originalOpen = (targetWindow.open.__mitOriginalOpen || targetWindow.open).bind(targetWindow);
+      const wrappedOpen = (...args) => {
+        if (popupBlockEnabled()) {
+          notePopupBlocked();
+          return null;
+        }
+        return originalOpen(...args);
+      };
+      try {
+        Object.defineProperty(wrappedOpen, "__mitSubmitterWrapper", { value: true });
+        Object.defineProperty(wrappedOpen, "__mitOriginalOpen", { value: originalOpen });
+      } catch (_) {
+        wrappedOpen.__mitSubmitterWrapper = true;
+        wrappedOpen.__mitOriginalOpen = originalOpen;
+      }
+      targetWindow.open = wrappedOpen;
+    }
+
+    if (popupBlockEventsInstalled) return;
+    popupBlockEventsInstalled = true;
+
+    window.addEventListener("click", (event) => {
+      if (!popupBlockEnabled() || root?.contains(event.target)) return;
+      const link = event.target?.closest?.("a[href]");
+      if (!link) return;
+      const target = String(link.getAttribute("target") || "").toLowerCase();
+      if (target && target !== "_self" && target !== "_top" && target !== "_parent") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        link.removeAttribute("target");
+        notePopupBlocked();
+      }
+    }, true);
+
+    window.addEventListener("submit", (event) => {
+      if (!popupBlockEnabled() || root?.contains(event.target)) return;
+      const form = event.target;
+      const target = String(form?.getAttribute?.("target") || "").toLowerCase();
+      if (target && target !== "_self" && target !== "_top" && target !== "_parent") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        form.removeAttribute("target");
+        notePopupBlocked();
+      }
+    }, true);
+  }
+
   function bindMiniDrag() {
     const el = root?.querySelector(".mit-mini-toggle");
     if (!el) return;
@@ -708,6 +790,7 @@
         <div class="mit-body">
           <label>Host <input data-field="host" value="${escapeAttr(state.host)}" placeholder="https://your-mit-host"></label>
           <label class="mit-check"><input data-field="useBasicAuth" type="checkbox" ${state.useBasicAuth ? "checked" : ""}> Basic Auth</label>
+          <label class="mit-check"><input data-field="blockPopupsForHost" type="checkbox" ${popupBlockEnabled() ? "checked" : ""}> Block popups on this host</label>
           <div class="mit-grid">
             <label>User <input data-field="username" value="${escapeAttr(state.username)}"></label>
             <label>Pass <input data-field="password" type="password" value="${escapeAttr(state.password)}"></label>
@@ -752,6 +835,10 @@
     });
     bindInput('[data-field="host"]', "host", normalizeHost);
     bindInput('[data-field="useBasicAuth"]', "useBasicAuth");
+    const blockPopups = root.querySelector('[data-field="blockPopupsForHost"]');
+    if (blockPopups) {
+      blockPopups.addEventListener("change", () => setPopupBlockEnabled(blockPopups.checked));
+    }
     bindInput('[data-field="username"]', "username");
     bindInput('[data-field="password"]', "password");
     bindInput('[data-field="zipName"]', "zipName");
@@ -992,6 +1079,7 @@
     }
     document.body.appendChild(root);
     render();
+    installPopupBlocker();
     window.addEventListener("pointerdown", (event) => {
       if (root.contains(event.target)) return;
       window.setTimeout(() => ensureTopLayer(true), 0);
@@ -1002,6 +1090,7 @@
         return;
       }
       ensureTopLayer();
+      installPopupBlocker();
     }, 30000);
   }
 
