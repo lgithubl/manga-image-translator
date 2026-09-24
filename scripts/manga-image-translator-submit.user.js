@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      0.1.10
+// @version      0.1.11
 // @description  Collect manga page images and submit them to a manga-image-translator server.
 // @match        *://*/*
 // @run-at       document-start
@@ -61,6 +61,7 @@
   let state = loadState();
   let running = false;
   let root;
+  let panelFrame;
   let statusTimer;
   let suppressMiniClickUntil = 0;
   installEarlyPanelShield();
@@ -99,9 +100,9 @@
   }
 
   function eventTargetsPanel(event) {
-    if (!root) return false;
+    if (!root && !panelFrame) return false;
     const path = typeof event.composedPath === "function" ? event.composedPath() : [];
-    return path.includes(root) || root.contains(event.target);
+    return path.includes(root) || path.includes(panelFrame) || root?.contains(event.target) || panelFrame?.contains(event.target);
   }
 
   function installEarlyPanelShield() {
@@ -159,7 +160,9 @@
 
   function detectImages() {
     const found = [];
-    for (const img of Array.from(document.images)) {
+    const readerImages = Array.from(document.querySelectorAll("[data-image-data] img"));
+    const images = readerImages.length ? readerImages : Array.from(document.images);
+    for (const img of images) {
       const url = imageUrlFromElement(img);
       if (isLikelyMangaImage(img, url)) {
         found.push(url);
@@ -600,7 +603,7 @@
   }
 
   function clampPanelPosition(left, top) {
-    const rect = root?.getBoundingClientRect();
+    const rect = panelFrame?.getBoundingClientRect() || root?.getBoundingClientRect();
     const width = rect?.width || 56;
     const height = rect?.height || 40;
     const margin = 8;
@@ -611,22 +614,30 @@
   }
 
   function applyPanelPosition() {
-    if (!root) return;
+    const target = panelFrame || root;
+    if (!target) return;
     if (Number.isFinite(state.panelLeft) && Number.isFinite(state.panelTop)) {
       const pos = clampPanelPosition(state.panelLeft, state.panelTop);
       state.panelLeft = pos.left;
       state.panelTop = pos.top;
-      root.style.left = `${pos.left}px`;
-      root.style.top = `${pos.top}px`;
-      root.style.right = "auto";
+      target.style.left = `${pos.left}px`;
+      target.style.top = `${pos.top}px`;
+      target.style.right = "auto";
     } else {
-      root.style.left = "";
-      root.style.top = "";
-      root.style.right = "";
+      target.style.left = "";
+      target.style.top = "";
+      target.style.right = "";
     }
   }
 
   function ensureTopLayer(forceToFront = false) {
+    if (panelFrame) {
+      panelFrame.style.zIndex = "2147483647";
+      if (forceToFront && panelFrame.parentNode) {
+        panelFrame.parentNode.appendChild(panelFrame);
+      }
+      return;
+    }
     if (!root || typeof root.showPopover !== "function") return;
     try {
       if (forceToFront && root.matches(":popover-open")) {
@@ -638,6 +649,20 @@
     } catch (_) {
       // Some pages/browsers can reject popover while the document is inactive.
     }
+  }
+
+  function syncFrameSize() {
+    if (!panelFrame || !root) return;
+    const viewportWidth = window.innerWidth || 320;
+    const viewportHeight = window.innerHeight || 640;
+    if (state.collapsed) {
+      panelFrame.style.width = "64px";
+      panelFrame.style.height = "48px";
+      return;
+    }
+    const width = Math.min(320, Math.max(280, viewportWidth - 16));
+    panelFrame.style.width = `${width}px`;
+    panelFrame.style.height = `${Math.min(viewportHeight - 16, Math.max(260, root.scrollHeight || 520))}px`;
   }
 
   function bindMiniDrag() {
@@ -652,7 +677,7 @@
 
     el.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
-      const rect = root.getBoundingClientRect();
+      const rect = (panelFrame || root).getBoundingClientRect();
       dragging = true;
       moved = false;
       startX = event.clientX;
@@ -671,9 +696,10 @@
       const pos = clampPanelPosition(startLeft + dx, startTop + dy);
       state.panelLeft = pos.left;
       state.panelTop = pos.top;
-      root.style.left = `${pos.left}px`;
-      root.style.top = `${pos.top}px`;
-      root.style.right = "auto";
+      const target = panelFrame || root;
+      target.style.left = `${pos.left}px`;
+      target.style.top = `${pos.top}px`;
+      target.style.right = "auto";
       event.preventDefault();
     });
 
@@ -696,6 +722,7 @@
     root.classList.toggle("mit-root-collapsed", state.collapsed);
     if (state.collapsed) {
       root.innerHTML = `<button class="mit-mini-toggle" data-action="toggle">MIT</button>`;
+      syncFrameSize();
       applyPanelPosition();
       ensureTopLayer();
       bindMiniDrag();
@@ -750,6 +777,7 @@
         </div>
       </div>
     `;
+    syncFrameSize();
     applyPanelPosition();
     ensureTopLayer();
 
@@ -800,16 +828,20 @@
     return escapeHtml(value).replace(/`/g, "&#096;");
   }
 
-  function installStyles() {
-    GM_addStyle(`
+  function installStyles(targetDocument = document) {
+    const css = `
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        overflow: hidden;
+      }
       #mit-submitter-root {
-        position: fixed;
-        right: 16px;
-        top: 72px;
-        z-index: 2147483647;
-        width: min(320px, calc(100vw - 16px));
-        max-width: calc(100vw - 16px);
-        max-height: calc(100dvh - 24px);
+        position: static;
+        width: 100%;
+        max-width: 100%;
+        max-height: 100dvh;
         color: #172026;
         font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         font-size: 13px;
@@ -980,9 +1012,7 @@
       }
       @media (max-width: 520px), (max-height: 680px) {
         #mit-submitter-root {
-          right: 8px;
-          top: 8px;
-          width: min(300px, calc(100vw - 16px));
+          width: 100%;
           max-height: calc(100dvh - 16px);
         }
         #mit-submitter-root .mit-card {
@@ -998,30 +1028,63 @@
           max-height: 32dvh;
         }
       }
-    `);
+    `;
+    if (targetDocument === document && typeof GM_addStyle === "function") {
+      GM_addStyle(css);
+      return;
+    }
+    const style = targetDocument.createElement("style");
+    style.textContent = css;
+    targetDocument.head.appendChild(style);
   }
 
   function init() {
-    installStyles();
-    root = document.createElement("div");
+    panelFrame = document.createElement("iframe");
+    panelFrame.id = "mit-submitter-frame";
+    panelFrame.setAttribute("title", "Manga Image Translator Submitter");
+    panelFrame.setAttribute("aria-label", "Manga Image Translator Submitter");
+    Object.assign(panelFrame.style, {
+      position: "fixed",
+      right: "16px",
+      top: "72px",
+      width: "320px",
+      height: "560px",
+      maxWidth: "calc(100vw - 16px)",
+      maxHeight: "calc(100dvh - 24px)",
+      zIndex: "2147483647",
+      border: "0",
+      background: "transparent",
+      colorScheme: "normal",
+    });
+    document.body.appendChild(panelFrame);
+
+    const frameDocument = panelFrame.contentDocument;
+    frameDocument.open();
+    frameDocument.write("<!doctype html><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head><body></body></html>");
+    frameDocument.close();
+    installStyles(frameDocument);
+
+    root = frameDocument.createElement("div");
     root.id = "mit-submitter-root";
-    if (typeof root.showPopover === "function") {
-      root.setAttribute("popover", "manual");
-    }
-    document.body.appendChild(root);
+    frameDocument.body.appendChild(root);
     render();
     ["pointerenter", "pointerdown", "focusin"].forEach((type) => {
       root.addEventListener(type, () => ensureTopLayer(true), true);
     });
     window.addEventListener("pointerdown", (event) => {
-      if (root.contains(event.target)) return;
+      if (eventTargetsPanel(event)) return;
       window.setTimeout(() => ensureTopLayer(true), 0);
     }, true);
+    window.addEventListener("resize", () => {
+      syncFrameSize();
+      applyPanelPosition();
+    });
     statusTimer = window.setInterval(() => {
-      if (!document.body.contains(root)) {
+      if (!document.body.contains(panelFrame)) {
         window.clearInterval(statusTimer);
         return;
       }
+      syncFrameSize();
       ensureTopLayer();
     }, 30000);
   }
