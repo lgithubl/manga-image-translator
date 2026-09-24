@@ -160,9 +160,7 @@
 
   function detectImages() {
     const found = [];
-    const readerImages = Array.from(document.querySelectorAll("[data-image-data] img"));
-    const images = readerImages.length ? readerImages : Array.from(document.images);
-    for (const img of images) {
+    for (const img of Array.from(document.images)) {
       const url = imageUrlFromElement(img);
       if (isLikelyMangaImage(img, url)) {
         found.push(url);
