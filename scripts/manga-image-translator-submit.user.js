@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      1.0.2
+// @version      1.0.3
 // @description  Collect manga images, submit translations, and provide context-menu translation/TTS helpers.
 // @match        *://*/*
 // @run-at       document-start
@@ -1439,8 +1439,8 @@
     const viewportWidth = window.innerWidth || 320;
     const viewportHeight = window.innerHeight || 640;
     if (state.collapsed) {
-      panelFrame.style.width = "44px";
-      panelFrame.style.height = "44px";
+      panelFrame.style.width = "36px";
+      panelFrame.style.height = "36px";
       return;
     }
     const width = Math.min(320, Math.max(280, viewportWidth - 16));
@@ -1782,19 +1782,19 @@
         display: none;
       }
       #mit-submitter-root .mit-mini-toggle {
-        width: 40px;
-        height: 40px;
+        width: 32px;
+        height: 32px;
         padding: 0;
         border-radius: 50%;
         border: 0;
         background: rgba(15, 23, 42, 0.88);
         color: #fff;
-        box-shadow: 0 8px 20px rgba(15, 23, 42, 0.28);
+        box-shadow: 0 6px 14px rgba(15, 23, 42, 0.24);
         touch-action: none;
         user-select: none;
         cursor: pointer;
         font-weight: 700;
-        font-size: 15px;
+        font-size: 13px;
         line-height: 1;
       }
       #mit-submitter-root .mit-mini-toggle:hover,
