@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      1.0.6
+// @version      1.0.7
 // @description  Collect manga images, submit translations, and provide context-menu translation/TTS helpers.
 // @match        *://*/*
 // @run-at       document-start
@@ -1457,8 +1457,8 @@
     const viewportWidth = window.innerWidth || 320;
     const viewportHeight = window.innerHeight || 640;
     if (state.collapsed) {
-      panelFrame.style.width = "26px";
-      panelFrame.style.height = "10px";
+      panelFrame.style.width = "32px";
+      panelFrame.style.height = "20px";
       return;
     }
     const width = Math.min(320, Math.max(280, viewportWidth - 16));
@@ -1738,7 +1738,7 @@
       body {
         margin: 0;
         padding: 0;
-        background: transparent;
+        background: transparent !important;
         overflow: hidden;
       }
       #mit-submitter-root {
@@ -1762,10 +1762,12 @@
         box-sizing: border-box;
       }
       #mit-submitter-root.mit-root-collapsed {
-        width: 26px;
-        height: 10px;
+        width: 32px;
+        height: 20px;
         max-width: none;
         display: inline-flex;
+        align-items: center;
+        justify-content: center;
         background: transparent;
       }
       #mit-submitter-root .mit-card {
@@ -1801,8 +1803,8 @@
         display: none;
       }
       #mit-submitter-root .mit-mini-toggle {
-        width: 26px;
-        height: 10px;
+        width: 28px;
+        height: 14px;
         padding: 0;
         border-radius: 999px;
         border: 0;
@@ -2460,6 +2462,7 @@
     panelFrame.id = "mit-submitter-frame";
     panelFrame.setAttribute("title", "Manga Image Translator Submitter");
     panelFrame.setAttribute("aria-label", "Manga Image Translator Submitter");
+    panelFrame.setAttribute("allowtransparency", "true");
     Object.assign(panelFrame.style, {
       position: "fixed",
       right: "16px",
