@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      1.0.9
+// @version      1.0.10
 // @description  Collect manga images, submit translations, and provide context-menu translation/TTS helpers.
 // @match        *://*/*
 // @run-at       document-start
@@ -89,6 +89,7 @@
   let bigImageRoot;
   let statusTimer;
   let suppressMiniClickUntil = 0;
+  let miniDragState = null;
   let initialized = false;
   let menuContext = { imageUrl: "", text: "" };
   let activeModalId = "";
@@ -212,8 +213,12 @@
   }
 
   function installEarlyPanelShield() {
-    ["pointerdown", "mousedown", "mouseup", "click", "auxclick", "touchstart", "touchend"].forEach((type) => {
+    ["pointerdown", "pointermove", "pointerup", "pointercancel", "mousedown", "mouseup", "click", "auxclick", "touchstart", "touchend"].forEach((type) => {
       window.addEventListener(type, (event) => {
+        if (miniToggle?.contains(event.target) || (miniDragState && type.startsWith("pointer"))) {
+          handleMiniToggleShieldEvent(type, event);
+          return;
+        }
         if (!eventTargetsPanel(event)) return;
         if (bigImageRoot?.contains(event.target) && ["pointerdown", "mousedown", "touchstart", "click"].includes(type)) {
           hideBigImage();
@@ -225,6 +230,50 @@
         window.setTimeout(() => ensureTopLayer(true), 0);
       }, true);
     });
+  }
+
+  function handleMiniToggleShieldEvent(type, event) {
+    if (!miniToggle) return;
+    if (type === "pointerdown" && event.button === 0) {
+      const rect = miniToggle.getBoundingClientRect();
+      miniDragState = {
+        moved: false,
+        startX: event.clientX,
+        startY: event.clientY,
+        startLeft: rect.left,
+        startTop: rect.top,
+      };
+      miniToggle.setPointerCapture?.(event.pointerId);
+    } else if (type === "pointermove" && miniDragState) {
+      const dx = event.clientX - miniDragState.startX;
+      const dy = event.clientY - miniDragState.startY;
+      if (Math.abs(dx) + Math.abs(dy) > 4) miniDragState.moved = true;
+      if (miniDragState.moved) {
+        const pos = clampPanelPosition(miniDragState.startLeft + dx, miniDragState.startTop + dy);
+        state.panelLeft = pos.left;
+        state.panelTop = pos.top;
+        miniToggle.style.left = `${pos.left}px`;
+        miniToggle.style.top = `${pos.top}px`;
+        miniToggle.style.right = "auto";
+      }
+    } else if ((type === "pointerup" || type === "pointercancel") && miniDragState) {
+      miniToggle.releasePointerCapture?.(event.pointerId);
+      if (miniDragState.moved) {
+        suppressMiniClickUntil = Date.now() + 350;
+        saveState();
+      }
+      miniDragState = null;
+    } else if (type === "click") {
+      if (Date.now() >= suppressMiniClickUntil) {
+        state.collapsed = false;
+        saveState();
+        render();
+      }
+    }
+
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    window.setTimeout(() => ensureTopLayer(true), 0);
   }
 
   function absoluteUrl(url) {
