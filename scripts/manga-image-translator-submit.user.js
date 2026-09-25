@@ -9,6 +9,8 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_download
 // @grant        GM_addStyle
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @grant        unsafeWindow
 // @connect      *
 // ==/UserScript==
@@ -19,6 +21,7 @@
   if (window.top !== window) return;
 
   const STORAGE_KEY = "mit_submitter_state_v1";
+  const GLOBAL_STORAGE_KEY = "mit_submitter_global_state_v1";
   const IMAGE_EXTENSIONS = /\.(avif|bmp|gif|jpe?g|png|webp)(\?|#|$)/i;
   const DEFAULT_CONFIG = {
     detector: {
@@ -91,13 +94,21 @@
 
   function loadState() {
     try {
-      const loaded = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+      const local = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+      const global = readGlobalState() || {};
       return {
         ...defaultState,
-        ...loaded,
+        ...local,
+        ...global,
+        zipName: local.zipName ?? defaultState.zipName,
+        imageBlacklist: local.imageBlacklist ?? defaultState.imageBlacklist,
+        queue: Array.isArray(local.queue) ? local.queue : [],
+        resultsCount: local.resultsCount || 0,
+        lastMessage: local.lastMessage || "",
         assistant: {
           ...defaultState.assistant,
-          ...(loaded.assistant || {}),
+          ...(local.assistant || {}),
+          ...(global.assistant || {}),
         },
       };
     } catch (_) {
@@ -106,15 +117,49 @@
   }
 
   function saveState() {
-    const persisted = {
-      ...state,
+    const localPersisted = {
+      zipName: state.zipName,
+      imageBlacklist: state.imageBlacklist,
       queue: state.queue.slice(-300),
+      resultsCount: state.resultsCount || 0,
+      lastMessage: state.lastMessage || "",
+    };
+    const globalPersisted = {
+      host: state.host,
+      useBasicAuth: state.useBasicAuth,
+      username: state.username,
+      password: state.password,
+      configText: state.configText,
+      collapsed: state.collapsed,
+      panelLeft: state.panelLeft,
+      panelTop: state.panelTop,
+      popupBlockHosts: state.popupBlockHosts || {},
       assistant: {
         ...state.assistant,
         history: (state.assistant?.history || []).slice(-100),
       },
     };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(localPersisted));
+    writeGlobalState(globalPersisted);
+  }
+
+  function readGlobalState() {
+    if (typeof GM_getValue === "function") {
+      return GM_getValue(GLOBAL_STORAGE_KEY, null);
+    }
+    try {
+      return JSON.parse(localStorage.getItem(GLOBAL_STORAGE_KEY) || "null");
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function writeGlobalState(value) {
+    if (typeof GM_setValue === "function") {
+      GM_setValue(GLOBAL_STORAGE_KEY, value);
+      return;
+    }
+    localStorage.setItem(GLOBAL_STORAGE_KEY, JSON.stringify(value));
   }
 
   function normalizeHost(host) {
@@ -338,6 +383,20 @@
     };
   }
 
+  function validateImageTranslateUrl(url) {
+    try {
+      const parsed = new URL(url, location.href);
+      if (!parsed.pathname.includes("/translate/with-form/image")) {
+        throw new Error(
+          `图片翻译接口应填写 /translate/with-form/image/stream/web，当前是 ${parsed.pathname || "/"}。Sakura 的 http://...:11586/v1 只放在 Config JSON 的 translator.sakura_api_base 里。`
+        );
+      }
+    } catch (error) {
+      if (error?.message?.includes("图片翻译接口")) throw error;
+      throw new Error("图片翻译接口地址无效。建议填写 /translate/with-form/image/stream/web");
+    }
+  }
+
   function selectedPageText() {
     return String(window.getSelection?.() || "").trim();
   }
@@ -547,9 +606,11 @@
       const form = new FormData();
       form.append("image", file);
       form.append("config", state.configText || "{}");
+      const requestUrl = assistantUrl(assistantState().imageTranslatePath);
+      validateImageTranslateUrl(requestUrl);
       const response = await gmRequest({
         method: "POST",
-        url: assistantUrl(assistantState().imageTranslatePath),
+        url: requestUrl,
         headers: authHeader(),
         data: form,
         responseType: "arraybuffer",
