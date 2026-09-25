@@ -60,12 +60,17 @@
     panelTop: null,
     popupBlockHosts: {},
     assistant: {
-      textTranslatePath: "/assistant/translate-text",
+      textTranslatePath: "/v1/chat/completions",
       ttsPath: "/assistant/tts",
       imageTranslatePath: "/translate/with-form/image/stream/web",
       textTargetLang: "zh-CN",
       ttsVoice: "zh-CN",
-      requestJson: "{}",
+      requestJson: JSON.stringify({
+        model: "sukinishiro",
+        temperature: 0.3,
+        top_p: 0.3,
+        frequency_penalty: 0.1,
+      }, null, 2),
       history: [],
     },
   };
@@ -125,7 +130,10 @@
   function setMessage(message) {
     state.lastMessage = message;
     saveState();
-    render();
+    const messageEl = root?.querySelector(".mit-message");
+    if (messageEl) messageEl.textContent = message || "";
+    const summaryEl = root?.querySelector(".mit-summary");
+    if (summaryEl) summaryEl.textContent = statusText();
   }
 
   function eventTargetsPanel(event) {
@@ -231,6 +239,7 @@
       added += 1;
     }
     saveState();
+    render();
     setMessage(`检测到 ${urls.length} 张图，新增 ${added} 张，黑名单跳过 ${skipped} 张。`);
   }
 
@@ -276,6 +285,56 @@
     if (!host) throw new Error("请先填写 Host。");
     if (/^https?:\/\//i.test(path || "")) return path;
     return `${host}${String(path || "").startsWith("/") ? "" : "/"}${path || ""}`;
+  }
+
+  function isChatCompletionsUrl(url) {
+    return /\/v1\/chat\/completions(?:[?#]|$)/i.test(url || "");
+  }
+
+  function targetLangName(targetLang) {
+    const lang = String(targetLang || "").toLowerCase();
+    if (lang === "zh-cn" || lang === "chs" || lang.includes("chinese")) return "中文";
+    if (lang === "jpn" || lang === "ja" || lang.includes("japanese")) return "日文";
+    return targetLang || "中文";
+  }
+
+  function buildSakuraMessages(text, targetLang) {
+    return [
+      {
+        role: "system",
+        content: "你是一个轻小说翻译模型，可以流畅通顺地以日本轻小说的风格将日文翻译成简体中文，并联系上下文正确使用人称代词，不擅自添加原文中没有的代词。",
+      },
+      {
+        role: "user",
+        content: `将下面的日文文本翻译成${targetLangName(targetLang)}：${text}`,
+      },
+    ];
+  }
+
+  function buildTextTranslatePayload(text, assistant, requestUrl) {
+    const extra = assistantConfigObject();
+    if (isChatCompletionsUrl(requestUrl) || Array.isArray(extra.messages) || extra.model) {
+      const payload = {
+        model: "sukinishiro",
+        temperature: 0.3,
+        top_p: 0.3,
+        frequency_penalty: 0.1,
+        ...extra,
+      };
+      return {
+        ...payload,
+        messages: Array.isArray(payload.messages)
+          ? payload.messages
+          : buildSakuraMessages(text, assistant.textTargetLang),
+        max_tokens: payload.max_tokens || Math.max(String(text).length * 2, 512),
+      };
+    }
+    return {
+      text,
+      target_lang: assistant.textTargetLang,
+      config: extra,
+      ...extra,
+    };
   }
 
   function selectedPageText() {
@@ -356,12 +415,18 @@
     const contentType = response.responseHeaders?.match(/content-type:\s*([^\r\n]+)/i)?.[1] || "";
     if (typeof response.response === "object" && response.response && !(response.response instanceof Blob)) {
       const data = response.response;
+      if (Array.isArray(data.choices) && data.choices[0]) {
+        return String(data.choices[0].message?.content || data.choices[0].text || "");
+      }
       return String(data.translation || data.translated_text || data.text || data.result || data.output || "");
     }
     const raw = String(response.responseText || "");
     if (contentType.includes("json") || raw.trim().startsWith("{")) {
       try {
         const data = JSON.parse(raw);
+        if (Array.isArray(data.choices) && data.choices[0]) {
+          return String(data.choices[0].message?.content || data.choices[0].text || "");
+        }
         return String(data.translation || data.translated_text || data.text || data.result || data.output || raw);
       } catch (_) {
         return raw;
@@ -385,20 +450,15 @@
     });
     try {
       const assistant = assistantState();
-      const extra = assistantConfigObject();
+      const requestUrl = assistantUrl(assistant.textTranslatePath);
       const response = await gmRequest({
         method: "POST",
-        url: assistantUrl(assistant.textTranslatePath),
+        url: requestUrl,
         headers: {
           ...authHeader(),
           "Content-Type": "application/json",
         },
-        data: JSON.stringify({
-          text,
-          target_lang: assistant.textTargetLang,
-          config: extra,
-          ...extra,
-        }),
+        data: JSON.stringify(buildTextTranslatePayload(text, assistant, requestUrl)),
         responseType: "json",
         timeout: 120000,
       });
@@ -947,11 +1007,12 @@
   function bindInput(selector, key, transform = (value) => value) {
     const el = root.querySelector(selector);
     if (!el) return;
-    el.addEventListener("change", () => {
+    const update = () => {
       state[key] = transform(el.type === "checkbox" ? el.checked : el.value);
       saveState();
-      render();
-    });
+    };
+    el.addEventListener(el.type === "checkbox" ? "change" : "input", update);
+    if (el.type !== "checkbox") el.addEventListener("change", update);
   }
 
   function button(selector, handler) {
@@ -1156,8 +1217,8 @@
           </div>
           <div class="mit-assistant-list">${assistantHistory || '<div class="mit-muted">右键图片或选中文本后使用翻译助手。</div>'}</div>
           <details class="mit-section">
-            <summary>翻译参数</summary>
-            <label>Config JSON <textarea data-field="configText" spellcheck="false">${escapeHtml(state.configText)}</textarea></label>
+            <summary>配置</summary>
+            <label>图片翻译 Config JSON（批量队列和右键单图共用）<textarea data-field="configText" spellcheck="false">${escapeHtml(state.configText)}</textarea></label>
             <label>图片翻译接口 <input data-assistant-field="imageTranslatePath" value="${escapeAttr(assistant.imageTranslatePath)}"></label>
             <label>文本翻译接口 <input data-assistant-field="textTranslatePath" value="${escapeAttr(assistant.textTranslatePath)}"></label>
             <label>TTS 接口 <input data-assistant-field="ttsPath" value="${escapeAttr(assistant.ttsPath)}"></label>
@@ -1165,7 +1226,7 @@
               <label>目标语言 <input data-assistant-field="textTargetLang" value="${escapeAttr(assistant.textTargetLang)}"></label>
               <label>TTS Voice <input data-assistant-field="ttsVoice" value="${escapeAttr(assistant.ttsVoice)}"></label>
             </div>
-            <label>助手请求 JSON <textarea data-assistant-field="requestJson" spellcheck="false">${escapeHtml(assistant.requestJson)}</textarea></label>
+            <label>文本/TTS 请求 JSON（OpenAI/Sakura 参数或自定义助手参数）<textarea data-assistant-field="requestJson" spellcheck="false">${escapeHtml(assistant.requestJson)}</textarea></label>
           </details>
         </div>
       </div>
@@ -1210,11 +1271,12 @@
     bindInput('[data-field="imageBlacklist"]', "imageBlacklist");
     bindInput('[data-field="configText"]', "configText");
     root.querySelectorAll("[data-assistant-field]").forEach((el) => {
-      el.addEventListener("change", () => {
+      const updateAssistantField = () => {
         assistantState()[el.dataset.assistantField] = el.value;
         saveState();
-        render();
-      });
+      };
+      el.addEventListener("input", updateAssistantField);
+      el.addEventListener("change", updateAssistantField);
     });
     button('[data-action="clearAssistantHistory"]', clearAssistantHistory);
     button('[data-action="closeAssistantModal"]', () => {
@@ -1730,9 +1792,6 @@
       const imageUrl = image ? imageUrlFromElement(image) : "";
       const text = selectedPageText();
       if (!imageUrl && !text) return;
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation();
       showContextMenu(event, { imageUrl, text });
       ensureTopLayer(true);
     }, true);
