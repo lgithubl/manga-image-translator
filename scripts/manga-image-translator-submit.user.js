@@ -1731,7 +1731,7 @@
     contextMenu.id = "mit-context-menu";
     contextMenu.setAttribute("role", "menu");
     contextMenu.innerHTML = `
-      <div class="mit-menu-title">翻译助手</div>
+      <div class="mit-menu-title">翻译助手 · Shift+右键原菜单</div>
       <button type="button" role="menuitem" data-menu-action="translateImage">发送翻译</button>
       <div class="mit-menu-sep" data-menu-image-sep></div>
       <button type="button" role="menuitem" data-menu-action="translateText">翻译中文</button>
@@ -1804,11 +1804,18 @@
   function installContextMenu() {
     window.addEventListener("contextmenu", (event) => {
       if (eventTargetsPanel(event)) return;
+      if (event.shiftKey) {
+        hideContextMenu();
+        return;
+      }
       const target = event.target;
       const image = target?.closest?.("img");
       const imageUrl = image ? imageUrlFromElement(image) : "";
       const text = selectedPageText();
       if (!imageUrl && !text) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
       showContextMenu(event, { imageUrl, text });
       ensureTopLayer(true);
     }, true);
