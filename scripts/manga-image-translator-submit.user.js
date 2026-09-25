@@ -919,13 +919,48 @@
   }
 
   function extractZipNameFromSelector() {
-    const selector = String(state.zipNameSelector || "").trim();
+    const rule = String(state.zipNameSelector || "").trim();
+    if (!rule) return "";
+    if (rule.toLowerCase() === "title") return document.title || "";
+    if (rule.toLowerCase().startsWith("jsonld:")) {
+      return extractJsonLdValue(rule.slice("jsonld:".length).trim());
+    }
+    const attrMatch = rule.match(/::attr\(([^)]+)\)\s*$/i);
+    const selector = (attrMatch ? rule.slice(0, attrMatch.index) : rule).trim();
+    const attrName = attrMatch?.[1]?.trim();
     if (!selector) return "";
     try {
-      return String(document.querySelector(selector)?.textContent || "").trim();
+      const element = document.querySelector(selector);
+      if (!element) return "";
+      return String(attrName ? element.getAttribute(attrName) : element.textContent || "").trim();
     } catch (_) {
       return "";
     }
+  }
+
+  function extractJsonLdValue(path) {
+    if (!path) return "";
+    const parts = path.split(".").map((part) => part.trim()).filter(Boolean);
+    if (!parts.length) return "";
+    let type = "";
+    if (parts[0] && !/^\d+$/.test(parts[0])) {
+      type = parts.shift();
+    }
+    for (const script of Array.from(document.querySelectorAll('script[type="application/ld+json"]'))) {
+      try {
+        const parsed = JSON.parse(script.textContent || "null");
+        const nodes = Array.isArray(parsed) ? parsed : [parsed];
+        for (const node of nodes) {
+          const nodeTypes = Array.isArray(node?.["@type"]) ? node["@type"] : [node?.["@type"]];
+          if (type && !nodeTypes.includes(type)) continue;
+          const value = parts.reduce((current, part) => current == null ? current : current[part], node);
+          if (value != null && typeof value !== "object") return String(value).trim();
+        }
+      } catch (_) {
+        // Ignore invalid JSON-LD blocks from the page.
+      }
+    }
+    return "";
   }
 
   function saveBlob(blob, filename) {
@@ -1314,7 +1349,7 @@
         </div>
         <div class="mit-body">
           ${renderSection("host", "HOST 维度", `
-            <label>ZIP name selector <input data-field="zipNameSelector" value="${escapeAttr(state.zipNameSelector)}" placeholder="CSS selector, e.g. h1"></label>
+            <label>ZIP name rule <input data-field="zipNameSelector" value="${escapeAttr(state.zipNameSelector)}" placeholder="CSS / selector::attr(alt) / jsonld:ComicStory.name"></label>
             <label>ZIP name <input data-field="zipName" value="${escapeAttr(state.zipName)}"></label>
             <label>Image blacklist <input data-field="imageBlacklist" value="${escapeAttr(state.imageBlacklist)}" placeholder="abc123.webp, cover.jpg"></label>
           `)}
@@ -1529,8 +1564,8 @@
       }
       #mit-submitter-root .mit-body {
         display: grid;
-        gap: 7px;
-        padding: 9px;
+        gap: 4px;
+        padding: 7px;
         min-height: 0;
         flex: 1;
         overflow-y: auto;
@@ -1622,21 +1657,19 @@
         overscroll-behavior: contain;
       }
       #mit-submitter-root .mit-section {
-        border: 1px solid #dbe3ea;
-        border-radius: 6px;
-        background: #fff;
-        overflow: hidden;
+        min-width: 0;
       }
       #mit-submitter-root .mit-section-toggle {
         width: 100%;
-        min-height: 24px;
-        padding: 3px 8px;
-        border: 0;
-        border-radius: 0;
-        background: #eef2f7;
+        min-height: 22px;
+        padding: 2px 7px;
+        border: 1px solid #cbd5e1;
+        border-radius: 5px;
+        background: #e7edf4;
         color: #172026;
         cursor: pointer;
         font-weight: 700;
+        font-size: 12px;
         display: flex;
         align-items: center;
         justify-content: flex-start;
@@ -1657,11 +1690,20 @@
       #mit-submitter-root .mit-section-body {
         display: grid;
         gap: 7px;
+        max-height: min(390px, 52dvh);
+        margin-top: 4px;
         padding: 7px;
+        border: 1px solid #dbe3ea;
+        border-radius: 6px;
+        background: #fff;
+        overflow-y: auto;
+        overscroll-behavior: contain;
       }
       #mit-submitter-root .mit-section-body[hidden] {
         display: none;
+        margin-top: 0;
         padding: 0;
+        border: 0;
       }
       #mit-submitter-root .mit-config-group {
         display: grid;
