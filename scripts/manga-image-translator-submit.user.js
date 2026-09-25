@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      1.0.1
+// @version      1.0.2
 // @description  Collect manga images, submit translations, and provide context-menu translation/TTS helpers.
 // @match        *://*/*
 // @run-at       document-start
@@ -1439,8 +1439,8 @@
     const viewportWidth = window.innerWidth || 320;
     const viewportHeight = window.innerHeight || 640;
     if (state.collapsed) {
-      panelFrame.style.width = "56px";
-      panelFrame.style.height = "56px";
+      panelFrame.style.width = "44px";
+      panelFrame.style.height = "44px";
       return;
     }
     const width = Math.min(320, Math.max(280, viewportWidth - 16));
@@ -1746,6 +1746,8 @@
       #mit-submitter-root.mit-root-collapsed {
         width: auto;
         max-width: none;
+        display: inline-flex;
+        background: transparent;
       }
       #mit-submitter-root .mit-card {
         background: #f8fafc;
@@ -1780,15 +1782,25 @@
         display: none;
       }
       #mit-submitter-root .mit-mini-toggle {
-        width: 52px;
-        height: 52px;
+        width: 40px;
+        height: 40px;
         padding: 0;
         border-radius: 50%;
-        box-shadow: 0 10px 28px rgba(15, 23, 42, 0.22);
+        border: 0;
+        background: rgba(15, 23, 42, 0.88);
+        color: #fff;
+        box-shadow: 0 8px 20px rgba(15, 23, 42, 0.28);
         touch-action: none;
         user-select: none;
-        font-size: 18px;
+        cursor: pointer;
+        font-weight: 700;
+        font-size: 15px;
         line-height: 1;
+      }
+      #mit-submitter-root .mit-mini-toggle:hover,
+      #mit-submitter-root .mit-mini-toggle:focus {
+        background: rgba(15, 23, 42, 0.96);
+        outline: none;
       }
       #mit-submitter-root label {
         display: grid;
