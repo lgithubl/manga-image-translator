@@ -443,6 +443,7 @@
 
   function assistantTypeLabel(type) {
     if (type === "image") return "图片";
+    if (type === "textAudio") return "文+音";
     if (type === "audio") return "语音";
     if (type === "text") return "文本";
     return "记录";
@@ -521,6 +522,53 @@
     return raw;
   }
 
+  async function requestTextTranslation(text) {
+    const assistant = assistantState();
+    const requestUrl = assistantUrl(assistant.textTranslatePath);
+    const response = await gmRequest({
+      method: "POST",
+      url: requestUrl,
+      headers: {
+        ...authHeader(),
+        "Content-Type": "application/json",
+      },
+      data: JSON.stringify(buildTextTranslatePayload(text, assistant, requestUrl)),
+      responseType: "json",
+      timeout: 120000,
+    });
+    return extractTextResponse(response);
+  }
+
+  async function requestTextSpeech(text) {
+    const assistant = assistantState();
+    const extra = assistantConfigObject("tts");
+    const response = await gmRequest({
+      method: "POST",
+      url: assistantUrl(assistant.ttsPath),
+      headers: {
+        ...authHeader(),
+        "Content-Type": "application/json",
+      },
+      data: JSON.stringify({
+        text,
+        voice: assistant.ttsVoice,
+        config: extra,
+        ...extra,
+      }),
+      responseType: "blob",
+      timeout: 180000,
+    });
+    const blob = response.response instanceof Blob
+      ? response.response
+      : new Blob([response.response], { type: "audio/mpeg" });
+    const contentType = blob.type || response.responseHeaders?.match(/content-type:\s*([^\r\n]+)/i)?.[1] || "";
+    if (contentType.includes("json") || contentType.includes("text")) {
+      const textResponse = await blobToText(blob);
+      throw new Error(textResponse || "unexpected TTS response");
+    }
+    return blobToDataUrl(blob);
+  }
+
   async function translateSelectedText(text = selectedPageText()) {
     if (!text) {
       setMessage("请先选择文本。");
@@ -535,22 +583,9 @@
       message: "翻译中",
     });
     try {
-      const assistant = assistantState();
-      const requestUrl = assistantUrl(assistant.textTranslatePath);
-      const response = await gmRequest({
-        method: "POST",
-        url: requestUrl,
-        headers: {
-          ...authHeader(),
-          "Content-Type": "application/json",
-        },
-        data: JSON.stringify(buildTextTranslatePayload(text, assistant, requestUrl)),
-        responseType: "json",
-        timeout: 120000,
-      });
       updateAssistantHistory(entry.id, {
         status: "done",
-        resultText: extractTextResponse(response),
+        resultText: await requestTextTranslation(text),
         message: "翻译完成",
       });
       setMessage("文本翻译完成。");
@@ -574,35 +609,9 @@
       message: "生成语音中",
     });
     try {
-      const assistant = assistantState();
-      const extra = assistantConfigObject("tts");
-      const response = await gmRequest({
-        method: "POST",
-        url: assistantUrl(assistant.ttsPath),
-        headers: {
-          ...authHeader(),
-          "Content-Type": "application/json",
-        },
-        data: JSON.stringify({
-          text,
-          voice: assistant.ttsVoice,
-          config: extra,
-          ...extra,
-        }),
-        responseType: "blob",
-        timeout: 180000,
-      });
-      const blob = response.response instanceof Blob
-        ? response.response
-        : new Blob([response.response], { type: "audio/mpeg" });
-      const contentType = blob.type || response.responseHeaders?.match(/content-type:\s*([^\r\n]+)/i)?.[1] || "";
-      if (contentType.includes("json") || contentType.includes("text")) {
-        const textResponse = await blobToText(blob);
-        throw new Error(textResponse || "unexpected TTS response");
-      }
       updateAssistantHistory(entry.id, {
         status: "done",
-        audioUrl: await blobToDataUrl(blob),
+        audioUrl: await requestTextSpeech(text),
         message: "语音完成",
       });
       setMessage("语音生成完成。");
@@ -610,6 +619,90 @@
       updateAssistantHistory(entry.id, { status: "error", message: error.message || String(error) });
       setMessage(`文本转语音失败: ${error.message || String(error)}`);
     }
+  }
+
+  function refreshTextAudioStatus(item) {
+    const textDone = item.textStatus === "done";
+    const audioDone = item.audioStatus === "done";
+    const textError = item.textStatus === "error";
+    const audioError = item.audioStatus === "error";
+    if (textDone && audioDone) return { status: "done", message: "翻译和语音完成" };
+    if ((textDone || textError) && (audioDone || audioError)) {
+      return {
+        status: textDone || audioDone ? "done" : "error",
+        message: [
+          textDone ? "翻译完成" : `翻译失败: ${item.textMessage || ""}`,
+          audioDone ? "语音完成" : `语音失败: ${item.audioMessage || ""}`,
+        ].join("；"),
+      };
+    }
+    return {
+      status: "pending",
+      message: [
+        textDone ? "翻译完成" : textError ? `翻译失败: ${item.textMessage || ""}` : "翻译中",
+        audioDone ? "语音完成" : audioError ? `语音失败: ${item.audioMessage || ""}` : "语音中",
+      ].join("；"),
+    };
+  }
+
+  function patchTextAudioHistory(id, patch) {
+    const current = assistantState().history.find((item) => item.id === id) || {};
+    updateAssistantHistory(id, {
+      ...patch,
+      ...refreshTextAudioStatus({ ...current, ...patch }),
+    });
+  }
+
+  async function translateAndSpeakSelectedText(text = selectedPageText()) {
+    if (!text) {
+      setMessage("请先选择文本。");
+      return;
+    }
+    const entry = addAssistantHistory({
+      type: "textAudio",
+      status: "pending",
+      title: shortText(text),
+      sourceText: text,
+      resultText: "",
+      audioUrl: "",
+      textStatus: "pending",
+      audioStatus: "pending",
+      textMessage: "翻译中",
+      audioMessage: "语音中",
+      message: "翻译中；语音中",
+    });
+    requestTextTranslation(text)
+      .then((resultText) => {
+        patchTextAudioHistory(entry.id, {
+          resultText,
+          textStatus: "done",
+          textMessage: "翻译完成",
+        });
+        setMessage("组合任务翻译完成。");
+      })
+      .catch((error) => {
+        patchTextAudioHistory(entry.id, {
+          textStatus: "error",
+          textMessage: error.message || String(error),
+        });
+        setMessage(`组合任务翻译失败: ${error.message || String(error)}`);
+      });
+    requestTextSpeech(text)
+      .then((audioUrl) => {
+        patchTextAudioHistory(entry.id, {
+          audioUrl,
+          audioStatus: "done",
+          audioMessage: "语音完成",
+        });
+        setMessage("组合任务语音完成。");
+      })
+      .catch((error) => {
+        patchTextAudioHistory(entry.id, {
+          audioStatus: "error",
+          audioMessage: error.message || String(error),
+        });
+        setMessage(`组合任务语音失败: ${error.message || String(error)}`);
+      });
   }
 
   async function translateImageUrlNow(url) {
@@ -1156,6 +1249,27 @@
       content = `
         <div class="mit-text-block">${escapeHtml(item.sourceText || "")}</div>
         ${item.audioUrl ? `<audio controls src="${escapeAttr(item.audioUrl)}"></audio>` : '<div class="mit-muted">语音还没有生成。</div>'}
+      `;
+    } else if (item.type === "textAudio") {
+      content = `
+        <div class="mit-modal-grid">
+          <div>
+            <strong>译文 <span class="mit-status mit-${escapeAttr(item.textStatus || "pending")}">${escapeHtml(item.textStatus || "pending")}</span></strong>
+            ${item.resultText
+              ? `<div class="mit-text-block">${escapeHtml(item.resultText)}</div>`
+              : `<div class="mit-muted">${escapeHtml(item.textMessage || "翻译中")}</div>`}
+          </div>
+          <div>
+            <strong>语音 <span class="mit-status mit-${escapeAttr(item.audioStatus || "pending")}">${escapeHtml(item.audioStatus || "pending")}</span></strong>
+            ${item.audioUrl
+              ? `<audio controls src="${escapeAttr(item.audioUrl)}"></audio>`
+              : `<div class="mit-muted">${escapeHtml(item.audioMessage || "语音中")}</div>`}
+          </div>
+          <div>
+            <strong>原文</strong>
+            <div class="mit-text-block">${escapeHtml(item.sourceText || "")}</div>
+          </div>
+        </div>
       `;
     } else {
       content = `
@@ -2111,6 +2225,8 @@
     contextMenu.setAttribute("role", "menu");
     contextMenu.innerHTML = `
       <div class="mit-menu-title">翻译助手 · Shift+右键原菜单</div>
+      <button type="button" role="menuitem" data-menu-action="translateAndSpeakText">翻译并语音</button>
+      <div class="mit-menu-sep" data-menu-text-sep></div>
       <button type="button" role="menuitem" data-menu-action="translateImage">发送翻译</button>
       <div class="mit-menu-sep" data-menu-image-sep></div>
       <button type="button" role="menuitem" data-menu-action="translateText">翻译中文</button>
@@ -2134,6 +2250,7 @@
     const action = buttonEl.dataset.menuAction;
     const context = { ...menuContext };
     hideContextMenu();
+    if (action === "translateAndSpeakText") translateAndSpeakSelectedText(context.text);
     if (action === "translateImage") translateImageUrlNow(context.imageUrl);
     if (action === "translateText") translateSelectedText(context.text);
     if (action === "speakText") speakSelectedText(context.text);
@@ -2147,8 +2264,10 @@
     };
     const imageButton = menu.querySelector('[data-menu-action="translateImage"]');
     const imageSep = menu.querySelector("[data-menu-image-sep]");
-    const textButtons = menu.querySelectorAll('[data-menu-action="translateText"], [data-menu-action="speakText"]');
+    const textSep = menu.querySelector("[data-menu-text-sep]");
+    const textButtons = menu.querySelectorAll('[data-menu-action="translateAndSpeakText"], [data-menu-action="translateText"], [data-menu-action="speakText"]');
     imageButton.style.display = menuContext.imageUrl ? "block" : "none";
+    textSep.style.display = menuContext.text ? "block" : "none";
     imageSep.style.display = menuContext.imageUrl && menuContext.text ? "block" : "none";
     textButtons.forEach((buttonEl) => {
       buttonEl.style.display = menuContext.text ? "block" : "none";
