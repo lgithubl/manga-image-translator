@@ -52,6 +52,7 @@
     useBasicAuth: false,
     username: "",
     password: "",
+    zipNameSelector: "",
     zipName: "manga-translator-results.zip",
     imageBlacklist: "",
     configText: JSON.stringify(DEFAULT_CONFIG, null, 2),
@@ -84,12 +85,12 @@
   let root;
   let panelFrame;
   let contextMenu;
+  let bigImageRoot;
   let statusTimer;
   let suppressMiniClickUntil = 0;
   let initialized = false;
   let menuContext = { imageUrl: "", text: "" };
   let activeModalId = "";
-  let activeImagePreview = null;
   let contextMenuShownAt = 0;
   let contextMenuStickyUntil = 0;
   installEarlyPanelShield();
@@ -112,6 +113,7 @@
         ...local,
         ...global,
         zipName: local.zipName ?? defaultState.zipName,
+        zipNameSelector: local.zipNameSelector ?? defaultState.zipNameSelector,
         imageBlacklist: local.imageBlacklist ?? defaultState.imageBlacklist,
         queue: Array.isArray(local.queue) ? local.queue : [],
         resultsCount: local.resultsCount || 0,
@@ -126,6 +128,7 @@
   function saveState() {
     const localPersisted = {
       zipName: state.zipName,
+      zipNameSelector: state.zipNameSelector,
       imageBlacklist: state.imageBlacklist,
       queue: state.queue.slice(-300),
       resultsCount: state.resultsCount || 0,
@@ -190,20 +193,25 @@
   }
 
   function eventTargetsPanel(event) {
-    if (!root && !panelFrame && !contextMenu) return false;
+    if (!root && !panelFrame && !contextMenu && !bigImageRoot) return false;
     const path = typeof event.composedPath === "function" ? event.composedPath() : [];
     return path.includes(root)
       || path.includes(panelFrame)
       || path.includes(contextMenu)
+      || path.includes(bigImageRoot)
       || root?.contains(event.target)
       || panelFrame?.contains(event.target)
-      || contextMenu?.contains(event.target);
+      || contextMenu?.contains(event.target)
+      || bigImageRoot?.contains(event.target);
   }
 
   function installEarlyPanelShield() {
     ["pointerdown", "mousedown", "mouseup", "click", "auxclick", "touchstart", "touchend"].forEach((type) => {
       window.addEventListener(type, (event) => {
         if (!eventTargetsPanel(event)) return;
+        if (bigImageRoot?.contains(event.target) && ["pointerdown", "mousedown", "touchstart", "click"].includes(type)) {
+          hideBigImage();
+        }
         if (contextMenu?.contains(event.target) && type === "click") {
           runContextMenuAction(event);
         }
@@ -901,11 +909,22 @@
   }
 
   function zipDownloadName() {
-    const raw = (state.zipName || "").trim();
+    const extracted = extractZipNameFromSelector();
+    const raw = (extracted || state.zipName || "").trim();
     if (!raw) return "manga-translator-results.zip";
     const cleaned = raw.replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, " ").trim();
     const base = cleaned || "manga-translator-results";
     return base.toLowerCase().endsWith(".zip") ? base : `${base}.zip`;
+  }
+
+  function extractZipNameFromSelector() {
+    const selector = String(state.zipNameSelector || "").trim();
+    if (!selector) return "";
+    try {
+      return String(document.querySelector(selector)?.textContent || "").trim();
+    } catch (_) {
+      return "";
+    }
   }
 
   function saveBlob(blob, filename) {
@@ -1044,15 +1063,6 @@
   function renderAssistantModal(item) {
     const title = item.title || item.sourceText || item.sourceUrl || "助手记录";
     const message = item.message ? `<div class="mit-modal-message mit-${escapeAttr(item.status || "done")}">${escapeHtml(item.message)}</div>` : "";
-    const lightbox = activeImagePreview ? `
-      <div class="mit-lightbox">
-        <div class="mit-lightbox-head">
-          <strong>${escapeHtml(activeImagePreview.title || "图片预览")}</strong>
-          <button data-action="closeBigImage">关闭大图</button>
-        </div>
-        <img src="${escapeAttr(activeImagePreview.src)}" alt="${escapeAttr(activeImagePreview.title || "image preview")}">
-      </div>
-    ` : "";
     let content = "";
     if (item.type === "image") {
       const result = item.resultUrl
@@ -1100,7 +1110,6 @@
           </div>
           ${message}
           <div class="mit-modal-body">${content}</div>
-          ${lightbox}
         </div>
       </div>
     `;
@@ -1292,29 +1301,37 @@
         <div class="mit-body">
           <details class="mit-section">
             <summary>HOST 维度</summary>
+            <label>ZIP name selector <input data-field="zipNameSelector" value="${escapeAttr(state.zipNameSelector)}" placeholder="CSS selector, e.g. h1"></label>
             <label>ZIP name <input data-field="zipName" value="${escapeAttr(state.zipName)}"></label>
             <label>Image blacklist <input data-field="imageBlacklist" value="${escapeAttr(state.imageBlacklist)}" placeholder="abc123.webp, cover.jpg"></label>
           </details>
           <details class="mit-section">
             <summary>ALL 维度</summary>
-            <label>图片翻译接口 <input data-assistant-field="imageTranslatePath" value="${escapeAttr(assistant.imageTranslatePath)}" placeholder="http://host:11585/translate/with-form/image/stream/web"></label>
-            <label>文本翻译接口 <input data-assistant-field="textTranslatePath" value="${escapeAttr(assistant.textTranslatePath)}" placeholder="http://host:11586/v1/chat/completions"></label>
-            <label>TTS 接口 <input data-assistant-field="ttsPath" value="${escapeAttr(assistant.ttsPath)}" placeholder="http://host:11587/assistant/tts"></label>
-            <label>图片翻译 Config JSON（批量队列和右键单图共用）<textarea data-field="configText" spellcheck="false">${escapeHtml(state.configText)}</textarea></label>
-            <div class="mit-grid">
-              <label>目标语言 <input data-assistant-field="textTargetLang" value="${escapeAttr(assistant.textTargetLang)}"></label>
-              <label>TTS Voice <input data-assistant-field="ttsVoice" value="${escapeAttr(assistant.ttsVoice)}"></label>
-            </div>
-            <label>文本请求 JSON（OpenAI/Sakura 参数）<textarea data-assistant-field="textRequestJson" spellcheck="false">${escapeHtml(assistant.textRequestJson)}</textarea></label>
-            <label>TTS 请求 JSON<textarea data-assistant-field="ttsRequestJson" spellcheck="false">${escapeHtml(assistant.ttsRequestJson)}</textarea></label>
-          </details>
-          <details class="mit-section">
-            <summary>批量相关按钮</summary>
             <label class="mit-check"><input data-field="useBasicAuth" type="checkbox" ${state.useBasicAuth ? "checked" : ""}> Basic Auth</label>
             <div class="mit-grid">
               <label>User <input data-field="username" value="${escapeAttr(state.username)}"></label>
               <label>Pass <input data-field="password" type="password" value="${escapeAttr(state.password)}"></label>
             </div>
+            <div class="mit-config-group">
+              <strong>图片翻译</strong>
+              <label>接口 <input data-assistant-field="imageTranslatePath" value="${escapeAttr(assistant.imageTranslatePath)}" placeholder="http://host:11585/translate/with-form/image/stream/web"></label>
+              <label>Config JSON（批量队列和右键单图共用）<textarea data-field="configText" spellcheck="false">${escapeHtml(state.configText)}</textarea></label>
+            </div>
+            <div class="mit-config-group">
+              <strong>文本翻译</strong>
+              <label>接口 <input data-assistant-field="textTranslatePath" value="${escapeAttr(assistant.textTranslatePath)}" placeholder="http://host:11586/v1/chat/completions"></label>
+              <label>目标语言 <input data-assistant-field="textTargetLang" value="${escapeAttr(assistant.textTargetLang)}"></label>
+              <label>请求 JSON（OpenAI/Sakura 参数）<textarea data-assistant-field="textRequestJson" spellcheck="false">${escapeHtml(assistant.textRequestJson)}</textarea></label>
+            </div>
+            <div class="mit-config-group">
+              <strong>TTS</strong>
+              <label>接口 <input data-assistant-field="ttsPath" value="${escapeAttr(assistant.ttsPath)}" placeholder="http://host:11587/assistant/tts"></label>
+              <label>TTS Voice <input data-assistant-field="ttsVoice" value="${escapeAttr(assistant.ttsVoice)}"></label>
+              <label>请求 JSON<textarea data-assistant-field="ttsRequestJson" spellcheck="false">${escapeHtml(assistant.ttsRequestJson)}</textarea></label>
+            </div>
+          </details>
+          <details class="mit-section">
+            <summary>批量相关按钮</summary>
             <div class="mit-actions mit-actions-compact">
               <button data-action="detect">抓取图片</button>
               <button data-action="translate" ${running ? "disabled" : ""}>翻译队列</button>
@@ -1365,7 +1382,6 @@
     root.querySelectorAll('[data-action="openAssistantItem"]').forEach((el) => {
       el.addEventListener("click", () => {
         activeModalId = el.dataset.id;
-        activeImagePreview = null;
         render();
       });
     });
@@ -1379,6 +1395,7 @@
     bindInput('[data-field="useBasicAuth"]', "useBasicAuth");
     bindInput('[data-field="username"]', "username");
     bindInput('[data-field="password"]', "password");
+    bindInput('[data-field="zipNameSelector"]', "zipNameSelector");
     bindInput('[data-field="zipName"]', "zipName");
     bindInput('[data-field="imageBlacklist"]', "imageBlacklist");
     bindInput('[data-field="configText"]', "configText");
@@ -1393,20 +1410,11 @@
     button('[data-action="clearAssistantHistory"]', clearAssistantHistory);
     button('[data-action="closeAssistantModal"]', () => {
       activeModalId = "";
-      activeImagePreview = null;
-      render();
-    });
-    button('[data-action="closeBigImage"]', () => {
-      activeImagePreview = null;
       render();
     });
     root.querySelectorAll('[data-action="openBigImage"]').forEach((el) => {
       el.addEventListener("click", () => {
-        activeImagePreview = {
-          src: el.getAttribute("src") || "",
-          title: el.dataset.title || "图片预览",
-        };
-        render();
+        showBigImage(el.getAttribute("src") || "", el.dataset.title || "图片预览");
       });
     });
     root.querySelectorAll('[data-action="downloadAssistantUrl"]').forEach((el) => {
@@ -1593,16 +1601,32 @@
         overscroll-behavior: contain;
       }
       #mit-submitter-root .mit-section {
-        display: grid;
-        gap: 7px;
-        padding: 7px;
         border: 1px solid #dbe3ea;
         border-radius: 8px;
         background: #fff;
+        overflow: hidden;
       }
       #mit-submitter-root .mit-section summary {
         cursor: pointer;
         font-weight: 700;
+        min-height: 26px;
+        padding: 5px 8px;
+        display: flex;
+        align-items: center;
+        line-height: 1.15;
+      }
+      #mit-submitter-root .mit-section > :not(summary) {
+        margin: 7px;
+      }
+      #mit-submitter-root .mit-config-group {
+        display: grid;
+        gap: 7px;
+        padding-top: 7px;
+        border-top: 1px solid #e2e8f0;
+      }
+      #mit-submitter-root .mit-config-group:first-of-type {
+        border-top: 0;
+        padding-top: 0;
       }
       #mit-submitter-root .mit-helper-head {
         display: flex;
@@ -1768,32 +1792,6 @@
         border-radius: 6px;
         background: #e2e8f0;
       }
-      #mit-submitter-root .mit-lightbox {
-        position: absolute;
-        inset: 0;
-        z-index: 2;
-        display: grid;
-        grid-template-rows: auto minmax(0, 1fr);
-        gap: 8px;
-        padding: 10px;
-        background: #0f172a;
-        color: white;
-        border-radius: 8px;
-      }
-      #mit-submitter-root .mit-lightbox-head {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-      }
-      #mit-submitter-root .mit-lightbox img {
-        width: 100%;
-        height: 100%;
-        min-height: 0;
-        object-fit: contain;
-        background: #020617;
-        border-radius: 6px;
-      }
       @media (max-width: 520px), (max-height: 680px) {
         #mit-submitter-root {
           width: 100%;
@@ -1877,8 +1875,96 @@
         margin: 5px 3px;
         background: #dbe3ea;
       }
+      #mit-big-image-root {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: none;
+        grid-template-rows: auto minmax(0, 1fr);
+        gap: 8px;
+        padding: 12px;
+        background: rgba(2, 6, 23, 0.94);
+        color: white;
+        box-sizing: border-box;
+        font: 13px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      #mit-big-image-root .mit-big-image-head {
+        position: relative;
+        z-index: 2;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      #mit-big-image-root button {
+        border: 1px solid #475569;
+        border-radius: 6px;
+        padding: 6px 10px;
+        background: #334155;
+        color: white;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 650;
+      }
+      #mit-big-image-root img {
+        position: relative;
+        z-index: 1;
+        pointer-events: none;
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        object-fit: contain;
+        background: #020617;
+        border-radius: 6px;
+      }
     `;
     (document.head || document.documentElement).appendChild(style);
+  }
+
+  function ensureBigImageRoot() {
+    if (bigImageRoot && document.documentElement.contains(bigImageRoot)) return bigImageRoot;
+    installOuterStyles();
+    bigImageRoot = document.createElement("div");
+    bigImageRoot.id = "mit-big-image-root";
+    bigImageRoot.innerHTML = `
+      <div class="mit-big-image-head">
+        <strong data-big-title>图片预览</strong>
+        <button type="button" data-big-close>关闭</button>
+      </div>
+      <img data-big-image alt="图片预览">
+    `;
+    (document.body || document.documentElement).appendChild(bigImageRoot);
+    ["pointerdown", "mousedown", "mouseup", "click", "auxclick", "touchstart", "touchend", "contextmenu"].forEach((type) => {
+      bigImageRoot.addEventListener(type, (event) => {
+        if (["pointerdown", "mousedown", "touchstart", "click"].includes(type)) {
+          hideBigImage();
+        }
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+      }, true);
+    });
+    bigImageRoot.querySelector("[data-big-close]").addEventListener("click", hideBigImage);
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && bigImageRoot?.style.display !== "none") hideBigImage();
+    }, true);
+    return bigImageRoot;
+  }
+
+  function showBigImage(src, title) {
+    if (!src) return;
+    const overlay = ensureBigImageRoot();
+    overlay.querySelector("[data-big-title]").textContent = title || "图片预览";
+    const img = overlay.querySelector("[data-big-image]");
+    img.src = src;
+    img.alt = title || "图片预览";
+    overlay.style.display = "grid";
+  }
+
+  function hideBigImage() {
+    if (!bigImageRoot) return;
+    bigImageRoot.style.display = "none";
+    const img = bigImageRoot.querySelector("[data-big-image]");
+    if (img) img.removeAttribute("src");
   }
 
   function ensureContextMenu() {
