@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      1.0.8
+// @version      1.0.9
 // @description  Collect manga images, submit translations, and provide context-menu translation/TTS helpers.
 // @match        *://*/*
 // @run-at       document-start
@@ -84,6 +84,7 @@
   let running = false;
   let root;
   let panelFrame;
+  let miniToggle;
   let contextMenu;
   let bigImageRoot;
   let statusTimer;
@@ -196,14 +197,16 @@
   }
 
   function eventTargetsPanel(event) {
-    if (!root && !panelFrame && !contextMenu && !bigImageRoot) return false;
+    if (!root && !panelFrame && !miniToggle && !contextMenu && !bigImageRoot) return false;
     const path = typeof event.composedPath === "function" ? event.composedPath() : [];
     return path.includes(root)
       || path.includes(panelFrame)
+      || path.includes(miniToggle)
       || path.includes(contextMenu)
       || path.includes(bigImageRoot)
       || root?.contains(event.target)
       || panelFrame?.contains(event.target)
+      || miniToggle?.contains(event.target)
       || contextMenu?.contains(event.target)
       || bigImageRoot?.contains(event.target);
   }
@@ -1407,7 +1410,8 @@
   }
 
   function clampPanelPosition(left, top) {
-    const rect = panelFrame?.getBoundingClientRect() || root?.getBoundingClientRect();
+    const target = state.collapsed && miniToggle ? miniToggle : panelFrame || root;
+    const rect = target?.getBoundingClientRect();
     const width = rect?.width || 56;
     const height = rect?.height || 40;
     const margin = 8;
@@ -1418,7 +1422,7 @@
   }
 
   function applyPanelPosition() {
-    const target = panelFrame || root;
+    const target = state.collapsed && miniToggle ? miniToggle : panelFrame || root;
     if (!target) return;
     if (Number.isFinite(state.panelLeft) && Number.isFinite(state.panelTop)) {
       const pos = clampPanelPosition(state.panelLeft, state.panelTop);
@@ -1429,12 +1433,15 @@
       target.style.right = "auto";
     } else {
       target.style.left = "";
-      target.style.top = panelFrame ? "72px" : "";
-      target.style.right = panelFrame ? "16px" : "";
+      target.style.top = "72px";
+      target.style.right = "16px";
     }
   }
 
   function ensureTopLayer(forceToFront = false) {
+    if (miniToggle) {
+      miniToggle.style.zIndex = "2147483647";
+    }
     if (panelFrame) {
       panelFrame.style.zIndex = "2147483647";
       return;
@@ -1457,10 +1464,12 @@
     const viewportWidth = window.innerWidth || 320;
     const viewportHeight = window.innerHeight || 640;
     if (state.collapsed) {
-      panelFrame.style.width = "28px";
-      panelFrame.style.height = "14px";
+      panelFrame.style.display = "none";
+      if (miniToggle) miniToggle.style.display = "inline-flex";
       return;
     }
+    panelFrame.style.display = "block";
+    if (miniToggle) miniToggle.style.display = "none";
     const width = Math.min(320, Math.max(280, viewportWidth - 16));
     const top = Number.isFinite(state.panelTop) ? state.panelTop : 72;
     panelFrame.style.width = `${width}px`;
@@ -1468,8 +1477,10 @@
   }
 
   function bindMiniDrag() {
-    const el = root?.querySelector(".mit-mini-toggle");
+    const el = miniToggle;
     if (!el) return;
+    if (el.dataset.dragBound === "1") return;
+    el.dataset.dragBound = "1";
     let dragging = false;
     let moved = false;
     let startX = 0;
@@ -1479,7 +1490,7 @@
 
     el.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
-      const rect = (panelFrame || root).getBoundingClientRect();
+      const rect = el.getBoundingClientRect();
       dragging = true;
       moved = false;
       startX = event.clientX;
@@ -1498,10 +1509,9 @@
       const pos = clampPanelPosition(startLeft + dx, startTop + dy);
       state.panelLeft = pos.left;
       state.panelTop = pos.top;
-      const target = panelFrame || root;
-      target.style.left = `${pos.left}px`;
-      target.style.top = `${pos.top}px`;
-      target.style.right = "auto";
+      el.style.left = `${pos.left}px`;
+      el.style.top = `${pos.top}px`;
+      el.style.right = "auto";
       event.preventDefault();
     });
 
@@ -1523,17 +1533,10 @@
     if (!root) return;
     root.classList.toggle("mit-root-collapsed", state.collapsed);
     if (state.collapsed) {
-      root.innerHTML = `<button class="mit-mini-toggle" data-action="toggle" title="翻译助手">译</button>`;
       syncFrameSize();
       applyPanelPosition();
       ensureTopLayer();
       bindMiniDrag();
-      button('[data-action="toggle"]', () => {
-        if (Date.now() < suppressMiniClickUntil) return;
-        state.collapsed = false;
-        saveState();
-        render();
-      });
       return;
     }
 
@@ -1765,7 +1768,7 @@
         width: 28px;
         height: 14px;
         max-width: none;
-        display: inline-flex;
+        display: none;
         align-items: center;
         justify-content: center;
         background: transparent;
@@ -2175,6 +2178,31 @@
       #mit-submitter-frame {
         pointer-events: auto !important;
       }
+      #mit-mini-toggle {
+        position: fixed;
+        right: 16px;
+        top: 72px;
+        z-index: 2147483647;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 14px;
+        padding: 0;
+        border: 0;
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.88);
+        box-shadow: 0 4px 10px rgba(15, 23, 42, 0.22);
+        cursor: pointer;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      #mit-mini-toggle:hover,
+      #mit-mini-toggle:focus {
+        background: rgba(15, 23, 42, 0.96);
+        outline: none;
+      }
       #mit-context-menu {
         position: fixed;
         z-index: 2147483647;
@@ -2477,6 +2505,19 @@
       colorScheme: "normal",
     });
     mountTarget.appendChild(panelFrame);
+
+    miniToggle = document.createElement("button");
+    miniToggle.id = "mit-mini-toggle";
+    miniToggle.type = "button";
+    miniToggle.title = "翻译助手";
+    miniToggle.setAttribute("aria-label", "翻译助手");
+    miniToggle.addEventListener("click", () => {
+      if (Date.now() < suppressMiniClickUntil) return;
+      state.collapsed = false;
+      saveState();
+      render();
+    });
+    mountTarget.appendChild(miniToggle);
 
     const frameDocument = panelFrame.contentDocument;
     frameDocument.open();
