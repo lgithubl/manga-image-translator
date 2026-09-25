@@ -86,6 +86,7 @@
   let menuContext = { imageUrl: "", text: "" };
   let activeModalId = "";
   let contextMenuShownAt = 0;
+  let contextMenuStickyUntil = 0;
   installEarlyPanelShield();
 
   function loadState() {
@@ -1708,6 +1709,12 @@
         background: #e2e8f0;
         outline: none;
       }
+      #mit-context-menu .mit-menu-title {
+        padding: 4px 8px 6px;
+        color: #64748b;
+        font-size: 12px;
+        font-weight: 700;
+      }
       #mit-context-menu .mit-menu-sep {
         height: 1px;
         margin: 5px 3px;
@@ -1724,6 +1731,7 @@
     contextMenu.id = "mit-context-menu";
     contextMenu.setAttribute("role", "menu");
     contextMenu.innerHTML = `
+      <div class="mit-menu-title">翻译助手</div>
       <button type="button" role="menuitem" data-menu-action="translateImage">发送翻译</button>
       <div class="mit-menu-sep" data-menu-image-sep></div>
       <button type="button" role="menuitem" data-menu-action="translateText">翻译中文</button>
@@ -1768,20 +1776,29 @@
     });
     menu.style.display = "block";
     contextMenuShownAt = Date.now();
+    contextMenuStickyUntil = contextMenuShownAt + 5000;
     menu.style.left = "0px";
     menu.style.top = "0px";
     const rect = menu.getBoundingClientRect();
     const margin = 8;
-    const left = Math.min(Math.max(margin, event.clientX), Math.max(margin, window.innerWidth - rect.width - margin));
-    const top = Math.min(Math.max(margin, event.clientY), Math.max(margin, window.innerHeight - rect.height - margin));
+    const preferLeft = event.clientX - rect.width - margin;
+    const preferRight = event.clientX + margin;
+    const left = preferLeft >= margin
+      ? preferLeft
+      : Math.min(Math.max(margin, preferRight), Math.max(margin, window.innerWidth - rect.width - margin));
+    const top = Math.min(Math.max(margin, event.clientY - 6), Math.max(margin, window.innerHeight - rect.height - margin));
     menu.style.left = `${left}px`;
     menu.style.top = `${top}px`;
+    window.setTimeout(() => {
+      if (Date.now() >= contextMenuStickyUntil) hideContextMenu();
+    }, 9000);
   }
 
   function hideContextMenu() {
     if (!contextMenu) return;
     contextMenu.style.display = "none";
     menuContext = { imageUrl: "", text: "" };
+    contextMenuStickyUntil = 0;
   }
 
   function installContextMenu() {
@@ -1798,8 +1815,12 @@
     ["pointerdown", "click", "keydown", "scroll", "resize"].forEach((type) => {
       window.addEventListener(type, (event) => {
         if (type === "keydown" && event.key !== "Escape") return;
+        if (type === "keydown" && event.key === "Escape") {
+          hideContextMenu();
+          return;
+        }
         if (eventTargetsPanel(event)) return;
-        if (Date.now() - contextMenuShownAt < 250) return;
+        if (Date.now() < contextMenuStickyUntil) return;
         hideContextMenu();
       }, true);
     });
