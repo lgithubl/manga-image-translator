@@ -912,10 +912,7 @@
   function zipDownloadName() {
     const extracted = extractZipNameFromSelector();
     const raw = (extracted || state.zipName || "").trim();
-    if (!raw) return "manga-translator-results.zip";
-    const cleaned = raw.replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, " ").trim();
-    const base = cleaned || "manga-translator-results";
-    return base.toLowerCase().endsWith(".zip") ? base : `${base}.zip`;
+    return normalizeZipFileName(raw);
   }
 
   function refreshZipNameFromRule(showMessage = true) {
@@ -929,11 +926,19 @@
       if (showMessage) setMessage("没有匹配到 ZIP name。");
       return false;
     }
-    state.zipName = extracted;
+    state.zipName = normalizeZipFileName(extracted);
     saveState();
-    if (showMessage) setMessage(`已刷新 ZIP name: ${zipDownloadName()}`);
+    if (showMessage) setMessage(`已刷新 ZIP name: ${state.zipName}`);
     render();
     return true;
+  }
+
+  function normalizeZipFileName(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "manga-translator-results.zip";
+    const cleaned = raw.replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, " ").trim();
+    const base = cleaned || "manga-translator-results";
+    return base.toLowerCase().endsWith(".zip") ? base : `${base}.zip`;
   }
 
   function refreshZipNameFromRuleSoon() {
