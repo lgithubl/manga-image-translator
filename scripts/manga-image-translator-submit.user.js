@@ -620,10 +620,12 @@
       if (summary.error) throw new Error(summary.error);
       const host = normalizeHost(state.host);
       const resultUrl = summary.finalFolder ? `${host}/result/${encodeURIComponent(summary.finalFolder)}/final.png` : "";
+      const resultPreviewUrl = resultUrl ? await previewUrlForImage(resultUrl) : "";
       updateAssistantHistory(entry.id, {
         status: "done",
         folder: summary.finalFolder,
         resultUrl,
+        resultPreviewUrl,
         message: resultUrl ? "图片翻译完成" : "图片翻译完成，但未返回结果路径",
       });
       setMessage("图片翻译完成。");
@@ -648,6 +650,25 @@
     const ext = extensionFromUrlOrType(url, blob.type || contentType);
     const name = fileNameFromUrl(url, 1).replace(/\.[^.]+$/, ext);
     return new File([blob], name, { type: blob.type || contentType });
+  }
+
+  async function previewUrlForImage(url) {
+    try {
+      const response = await gmRequest({
+        method: "GET",
+        url,
+        responseType: "blob",
+        timeout: 120000,
+        headers: authHeader(),
+      });
+      const contentType = response.response?.type || response.responseHeaders?.match(/content-type:\s*([^\r\n]+)/i)?.[1] || "image/png";
+      const blob = response.response instanceof Blob
+        ? response.response
+        : new Blob([response.response], { type: contentType });
+      return await blobToDataUrl(blob);
+    } catch (_) {
+      return url;
+    }
   }
 
   function extensionFromUrlOrType(url, type) {
@@ -1017,19 +1038,19 @@
     let content = "";
     if (item.type === "image") {
       const result = item.resultUrl
-        ? `<img class="mit-preview-image" src="${escapeAttr(item.resultUrl)}" alt="translated image">
+        ? `<img class="mit-preview-image" src="${escapeAttr(item.resultPreviewUrl || item.resultUrl)}" alt="translated image">
            <button data-action="downloadAssistantUrl" data-url="${escapeAttr(item.resultUrl)}" data-name="${escapeAttr(`${safeFileStem(title)}.png`)}">下载译图</button>`
         : `<div class="mit-muted">译图还没有返回。</div>`;
       content = `
         <div class="mit-modal-grid">
           <div>
+            <strong>译图</strong>
+            ${result}
+          </div>
+          <div>
             <strong>原图</strong>
             ${item.sourceUrl ? `<img class="mit-preview-image" src="${escapeAttr(item.sourceUrl)}" alt="source image">
             <button data-action="downloadAssistantUrl" data-url="${escapeAttr(item.sourceUrl)}" data-name="${escapeAttr(fileNameFromUrl(item.sourceUrl, 1))}">下载原图</button>` : ""}
-          </div>
-          <div>
-            <strong>译图</strong>
-            ${result}
           </div>
         </div>
       `;
@@ -1042,12 +1063,12 @@
       content = `
         <div class="mit-modal-grid">
           <div>
-            <strong>原文</strong>
-            <div class="mit-text-block">${escapeHtml(item.sourceText || "")}</div>
-          </div>
-          <div>
             <strong>译文</strong>
             <div class="mit-text-block">${escapeHtml(item.resultText || "")}</div>
+          </div>
+          <div>
+            <strong>原文</strong>
+            <div class="mit-text-block">${escapeHtml(item.sourceText || "")}</div>
           </div>
         </div>
       `;
@@ -1250,21 +1271,13 @@
           <button data-action="toggle">收起</button>
         </div>
         <div class="mit-body">
-          <label>Host <input data-field="host" value="${escapeAttr(state.host)}" placeholder="https://your-mit-host"></label>
-          <label class="mit-check"><input data-field="useBasicAuth" type="checkbox" ${state.useBasicAuth ? "checked" : ""}> Basic Auth</label>
-          <div class="mit-grid">
-            <label>User <input data-field="username" value="${escapeAttr(state.username)}"></label>
-            <label>Pass <input data-field="password" type="password" value="${escapeAttr(state.password)}"></label>
-          </div>
           <label>ZIP name <input data-field="zipName" value="${escapeAttr(state.zipName)}"></label>
           <label>Image blacklist <input data-field="imageBlacklist" value="${escapeAttr(state.imageBlacklist)}" placeholder="abc123.webp, cover.jpg"></label>
-          <div class="mit-actions">
+          <div class="mit-actions mit-actions-compact">
             <button data-action="detect">抓取图片</button>
             <button data-action="translate" ${running ? "disabled" : ""}>翻译队列</button>
             <button data-action="refresh">刷新状态</button>
             <button data-action="download">下载 ZIP</button>
-          </div>
-          <div class="mit-actions">
             <button data-action="retry">失败重试</button>
             <button data-action="clearDone">清除完成</button>
             <button data-action="clearQueue">清空队列</button>
@@ -1279,16 +1292,25 @@
           </div>
           <div class="mit-assistant-list">${assistantHistory || '<div class="mit-muted">右键图片或选中文本后使用翻译助手。</div>'}</div>
           <details class="mit-section">
-            <summary>配置</summary>
+            <summary>All 配置</summary>
             <label>图片翻译 Config JSON（批量队列和右键单图共用）<textarea data-field="configText" spellcheck="false">${escapeHtml(state.configText)}</textarea></label>
-            <label>图片翻译接口 <input data-assistant-field="imageTranslatePath" value="${escapeAttr(assistant.imageTranslatePath)}"></label>
-            <label>文本翻译接口 <input data-assistant-field="textTranslatePath" value="${escapeAttr(assistant.textTranslatePath)}"></label>
-            <label>TTS 接口 <input data-assistant-field="ttsPath" value="${escapeAttr(assistant.ttsPath)}"></label>
             <div class="mit-grid">
               <label>目标语言 <input data-assistant-field="textTargetLang" value="${escapeAttr(assistant.textTargetLang)}"></label>
               <label>TTS Voice <input data-assistant-field="ttsVoice" value="${escapeAttr(assistant.ttsVoice)}"></label>
             </div>
             <label>文本/TTS 请求 JSON（OpenAI/Sakura 参数或自定义助手参数）<textarea data-assistant-field="requestJson" spellcheck="false">${escapeHtml(assistant.requestJson)}</textarea></label>
+          </details>
+          <details class="mit-section">
+            <summary>Host 配置</summary>
+            <label>Host <input data-field="host" value="${escapeAttr(state.host)}" placeholder="https://your-mit-host"></label>
+            <label class="mit-check"><input data-field="useBasicAuth" type="checkbox" ${state.useBasicAuth ? "checked" : ""}> Basic Auth</label>
+            <div class="mit-grid">
+              <label>User <input data-field="username" value="${escapeAttr(state.username)}"></label>
+              <label>Pass <input data-field="password" type="password" value="${escapeAttr(state.password)}"></label>
+            </div>
+            <label>图片翻译接口 <input data-assistant-field="imageTranslatePath" value="${escapeAttr(assistant.imageTranslatePath)}"></label>
+            <label>文本翻译接口 <input data-assistant-field="textTranslatePath" value="${escapeAttr(assistant.textTranslatePath)}"></label>
+            <label>TTS 接口 <input data-assistant-field="ttsPath" value="${escapeAttr(assistant.ttsPath)}"></label>
           </details>
         </div>
       </div>
@@ -1436,8 +1458,8 @@
       }
       #mit-submitter-root .mit-body {
         display: grid;
-        gap: 8px;
-        padding: 10px;
+        gap: 7px;
+        padding: 9px;
         min-height: 0;
         flex: 1;
         overflow-y: auto;
@@ -1495,17 +1517,21 @@
       #mit-submitter-root .mit-actions {
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 6px;
+        gap: 5px;
+      }
+      #mit-submitter-root .mit-actions-compact {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
       }
       #mit-submitter-root button {
         border: 1px solid #334155;
         border-radius: 6px;
-        padding: 6px 7px;
+        padding: 5px 6px;
         background: #334155;
         color: white;
         cursor: pointer;
         font: inherit;
         font-weight: 650;
+        line-height: 1.15;
       }
       #mit-submitter-root button:disabled {
         opacity: 0.5;
@@ -1526,8 +1552,8 @@
       }
       #mit-submitter-root .mit-section {
         display: grid;
-        gap: 8px;
-        padding: 8px;
+        gap: 7px;
+        padding: 7px;
         border: 1px solid #dbe3ea;
         border-radius: 8px;
         background: #fff;
@@ -1707,7 +1733,7 @@
           max-height: calc(100dvh - 16px);
         }
         #mit-submitter-root .mit-actions {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
+          grid-template-columns: repeat(3, minmax(0, 1fr));
         }
         #mit-submitter-root textarea {
           min-height: 82px;
