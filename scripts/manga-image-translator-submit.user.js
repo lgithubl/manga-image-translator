@@ -91,6 +91,7 @@
   let initialized = false;
   let menuContext = { imageUrl: "", text: "" };
   let activeModalId = "";
+  const openSections = new Set();
   let contextMenuShownAt = 0;
   let contextMenuStickyUntil = 0;
   installEarlyPanelShield();
@@ -1139,6 +1140,19 @@
     return `队列 ${state.queue.length} | 待翻译 ${counts.pending || 0} | 完成 ${counts.done || 0} | 失败 ${counts.error || 0} | 服务端结果 ${state.resultsCount || 0}`;
   }
 
+  function renderSection(id, title, content) {
+    const open = openSections.has(id);
+    return `
+      <section class="mit-section" data-section="${escapeAttr(id)}">
+        <button class="mit-section-toggle" type="button" data-action="toggleSection" data-section="${escapeAttr(id)}" aria-expanded="${open ? "true" : "false"}">
+          <span class="mit-section-caret">${open ? "▾" : "▸"}</span>
+          <span>${escapeHtml(title)}</span>
+        </button>
+        <div class="mit-section-body" ${open ? "" : "hidden"}>${content}</div>
+      </section>
+    `;
+  }
+
   function clampPanelPosition(left, top) {
     const rect = panelFrame?.getBoundingClientRect() || root?.getBoundingClientRect();
     const width = rect?.width || 56;
@@ -1299,14 +1313,12 @@
           <button data-action="toggle">收起</button>
         </div>
         <div class="mit-body">
-          <details class="mit-section">
-            <summary>HOST 维度</summary>
+          ${renderSection("host", "HOST 维度", `
             <label>ZIP name selector <input data-field="zipNameSelector" value="${escapeAttr(state.zipNameSelector)}" placeholder="CSS selector, e.g. h1"></label>
             <label>ZIP name <input data-field="zipName" value="${escapeAttr(state.zipName)}"></label>
             <label>Image blacklist <input data-field="imageBlacklist" value="${escapeAttr(state.imageBlacklist)}" placeholder="abc123.webp, cover.jpg"></label>
-          </details>
-          <details class="mit-section">
-            <summary>ALL 维度</summary>
+          `)}
+          ${renderSection("all", "ALL 维度", `
             <label class="mit-check"><input data-field="useBasicAuth" type="checkbox" ${state.useBasicAuth ? "checked" : ""}> Basic Auth</label>
             <div class="mit-grid">
               <label>User <input data-field="username" value="${escapeAttr(state.username)}"></label>
@@ -1329,9 +1341,8 @@
               <label>TTS Voice <input data-assistant-field="ttsVoice" value="${escapeAttr(assistant.ttsVoice)}"></label>
               <label>请求 JSON<textarea data-assistant-field="ttsRequestJson" spellcheck="false">${escapeHtml(assistant.ttsRequestJson)}</textarea></label>
             </div>
-          </details>
-          <details class="mit-section">
-            <summary>批量相关按钮</summary>
+          `)}
+          ${renderSection("batch-actions", "批量相关按钮", `
             <div class="mit-actions mit-actions-compact">
               <button data-action="detect">抓取图片</button>
               <button data-action="translate" ${running ? "disabled" : ""}>翻译队列</button>
@@ -1343,19 +1354,17 @@
             </div>
             <div class="mit-summary">${escapeHtml(statusText())}</div>
             <div class="mit-message">${escapeHtml(state.lastMessage || "")}</div>
-          </details>
-          <details class="mit-section">
-            <summary>批量队列</summary>
+          `)}
+          ${renderSection("batch-queue", "批量队列", `
             <div class="mit-list">${queuePreview || '<div class="mit-muted">还没有图片。点击“抓取图片”累计当前页图片。</div>'}</div>
-          </details>
-          <details class="mit-section">
-            <summary>助手缓存</summary>
+          `)}
+          ${renderSection("assistant-cache", "助手缓存", `
             <div class="mit-helper-head">
               <strong>缓存记录</strong>
               <button data-action="clearAssistantHistory">清空</button>
             </div>
             <div class="mit-assistant-list">${assistantHistory || '<div class="mit-muted">右键图片或选中文本后使用翻译助手。</div>'}</div>
-          </details>
+          `)}
         </div>
       </div>
       ${assistantModal}
@@ -1376,6 +1385,18 @@
     button('[data-action="retry"]', retryErrors);
     button('[data-action="clearDone"]', clearDone);
     button('[data-action="clearQueue"]', clearQueue);
+    root.querySelectorAll('[data-action="toggleSection"]').forEach((el) => {
+      el.addEventListener("click", () => {
+        const section = el.dataset.section || "";
+        if (!section) return;
+        if (openSections.has(section)) {
+          openSections.delete(section);
+        } else {
+          openSections.add(section);
+        }
+        render();
+      });
+    });
     root.querySelectorAll('[data-action="removeItem"]').forEach((el) => {
       el.addEventListener("click", () => removeQueueItem(el.dataset.id));
     });
@@ -1602,21 +1623,45 @@
       }
       #mit-submitter-root .mit-section {
         border: 1px solid #dbe3ea;
-        border-radius: 8px;
+        border-radius: 6px;
         background: #fff;
         overflow: hidden;
       }
-      #mit-submitter-root .mit-section summary {
+      #mit-submitter-root .mit-section-toggle {
+        width: 100%;
+        min-height: 24px;
+        padding: 3px 8px;
+        border: 0;
+        border-radius: 0;
+        background: #eef2f7;
+        color: #172026;
         cursor: pointer;
         font-weight: 700;
-        min-height: 26px;
-        padding: 5px 8px;
         display: flex;
         align-items: center;
+        justify-content: flex-start;
+        gap: 6px;
+        text-align: left;
         line-height: 1.15;
       }
-      #mit-submitter-root .mit-section > :not(summary) {
-        margin: 7px;
+      #mit-submitter-root .mit-section-toggle:hover,
+      #mit-submitter-root .mit-section-toggle:focus {
+        background: #e2e8f0;
+        outline: none;
+      }
+      #mit-submitter-root .mit-section-caret {
+        width: 12px;
+        flex: 0 0 12px;
+        color: #475569;
+      }
+      #mit-submitter-root .mit-section-body {
+        display: grid;
+        gap: 7px;
+        padding: 7px;
+      }
+      #mit-submitter-root .mit-section-body[hidden] {
+        display: none;
+        padding: 0;
       }
       #mit-submitter-root .mit-config-group {
         display: grid;
