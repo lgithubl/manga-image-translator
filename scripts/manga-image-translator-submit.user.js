@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      1.0.4
+// @version      1.0.5
 // @description  Collect manga images, submit translations, and provide context-menu translation/TTS helpers.
 // @match        *://*/*
 // @run-at       document-start
@@ -435,7 +435,25 @@
   }
 
   function hasDownloadLinkText(text) {
-    return /magnet:\?|ed2k:\/\/|https?:\/\//i.test(String(text || ""));
+    return String(text || "")
+      .split(/\s+/)
+      .some((item) => isDownloadLinkText(item));
+  }
+
+  function isDownloadLinkText(text) {
+    const value = String(text || "").trim();
+    if (/^(magnet:\?|ed2k:\/\/)/i.test(value)) return true;
+    if (!/^https?:\/\//i.test(value)) return false;
+    try {
+      const parsed = new URL(value);
+      const path = decodeURIComponent(parsed.pathname || "").toLowerCase();
+      if (/\.(torrent|zip|rar|7z|tar|gz|bz2|xz|iso|apk|exe|dmg|mp4|mkv|avi|mov|wmv|flv|webm|mp3|flac|wav|ass|srt)(?:$|[?#])/i.test(path)) {
+        return true;
+      }
+      return /(?:download|torrent|attachment|file|downurl|dl)(?:[/?#=&_-]|$)/i.test(`${parsed.pathname}${parsed.search}`);
+    } catch (_) {
+      return false;
+    }
   }
 
   function installExternalContextMenuBridge() {
@@ -1439,8 +1457,8 @@
     const viewportWidth = window.innerWidth || 320;
     const viewportHeight = window.innerHeight || 640;
     if (state.collapsed) {
-      panelFrame.style.width = "32px";
-      panelFrame.style.height = "20px";
+      panelFrame.style.width = "28px";
+      panelFrame.style.height = "14px";
       return;
     }
     const width = Math.min(320, Math.max(280, viewportWidth - 16));
@@ -1782,8 +1800,8 @@
         display: none;
       }
       #mit-submitter-root .mit-mini-toggle {
-        width: 28px;
-        height: 14px;
+        width: 24px;
+        height: 8px;
         padding: 0;
         border-radius: 999px;
         border: 0;
@@ -1796,14 +1814,6 @@
         font-weight: 700;
         font-size: 0;
         line-height: 1;
-      }
-      #mit-submitter-root .mit-mini-toggle::before {
-        content: "";
-        display: block;
-        width: 14px;
-        height: 2px;
-        border-radius: 999px;
-        background: rgba(255, 255, 255, 0.9);
       }
       #mit-submitter-root .mit-mini-toggle:hover,
       #mit-submitter-root .mit-mini-toggle:focus {
@@ -2417,7 +2427,7 @@
       const imageUrl = image ? imageUrlFromElement(image) : "";
       const text = selectedPageText();
       const linkHref = linkHrefFromTarget(target);
-      if (!imageUrl && !text && !linkHref) return;
+      if (!imageUrl && !text) return;
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
