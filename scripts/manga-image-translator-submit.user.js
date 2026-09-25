@@ -63,17 +63,18 @@
     panelTop: null,
     popupBlockHosts: {},
     assistant: {
-      textTranslatePath: "/v1/chat/completions",
-      ttsPath: "/assistant/tts",
-      imageTranslatePath: "/translate/with-form/image/stream/web",
+      textTranslatePath: "http://127.0.0.1:5003/v1/chat/completions",
+      ttsPath: "http://127.0.0.1:5003/assistant/tts",
+      imageTranslatePath: "http://127.0.0.1:5003/translate/with-form/image/stream/web",
       textTargetLang: "zh-CN",
       ttsVoice: "zh-CN",
-      requestJson: JSON.stringify({
+      textRequestJson: JSON.stringify({
         model: "sukinishiro",
         temperature: 0.3,
         top_p: 0.3,
         frequency_penalty: 0.1,
       }, null, 2),
+      ttsRequestJson: "{}",
       history: [],
     },
   };
@@ -88,6 +89,7 @@
   let initialized = false;
   let menuContext = { imageUrl: "", text: "" };
   let activeModalId = "";
+  let activeImagePreview = null;
   let contextMenuShownAt = 0;
   let contextMenuStickyUntil = 0;
   installEarlyPanelShield();
@@ -96,6 +98,15 @@
     try {
       const local = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
       const global = readGlobalState() || {};
+      const loadedAssistant = {
+        ...defaultState.assistant,
+        ...(local.assistant || {}),
+        ...(global.assistant || {}),
+      };
+      if (!loadedAssistant.textRequestJson && loadedAssistant.requestJson) {
+        loadedAssistant.textRequestJson = loadedAssistant.requestJson;
+      }
+      delete loadedAssistant.requestJson;
       return {
         ...defaultState,
         ...local,
@@ -105,11 +116,7 @@
         queue: Array.isArray(local.queue) ? local.queue : [],
         resultsCount: local.resultsCount || 0,
         lastMessage: local.lastMessage || "",
-        assistant: {
-          ...defaultState.assistant,
-          ...(local.assistant || {}),
-          ...(global.assistant || {}),
-        },
+        assistant: loadedAssistant,
       };
     } catch (_) {
       return { ...defaultState };
@@ -318,9 +325,11 @@
     return state.assistant;
   }
 
-  function assistantConfigObject() {
+  function assistantConfigObject(kind = "text") {
+    const assistant = assistantState();
+    const raw = kind === "tts" ? assistant.ttsRequestJson : assistant.textRequestJson;
     try {
-      return JSON.parse(assistantState().requestJson || "{}");
+      return JSON.parse(raw || "{}");
     } catch (_) {
       return {};
     }
@@ -331,6 +340,14 @@
     if (!host) throw new Error("请先填写 Host。");
     if (/^https?:\/\//i.test(path || "")) return path;
     return `${host}${String(path || "").startsWith("/") ? "" : "/"}${path || ""}`;
+  }
+
+  function imageTranslateUrl() {
+    return assistantUrl(assistantState().imageTranslatePath);
+  }
+
+  function imageServiceBase() {
+    return new URL(imageTranslateUrl()).origin;
   }
 
   function isChatCompletionsUrl(url) {
@@ -358,7 +375,7 @@
   }
 
   function buildTextTranslatePayload(text, assistant, requestUrl) {
-    const extra = assistantConfigObject();
+    const extra = assistantConfigObject("text");
     if (isChatCompletionsUrl(requestUrl) || Array.isArray(extra.messages) || extra.model) {
       const payload = {
         model: "sukinishiro",
@@ -549,7 +566,7 @@
     });
     try {
       const assistant = assistantState();
-      const extra = assistantConfigObject();
+      const extra = assistantConfigObject("tts");
       const response = await gmRequest({
         method: "POST",
         url: assistantUrl(assistant.ttsPath),
@@ -606,7 +623,7 @@
       const form = new FormData();
       form.append("image", file);
       form.append("config", state.configText || "{}");
-      const requestUrl = assistantUrl(assistantState().imageTranslatePath);
+      const requestUrl = imageTranslateUrl();
       validateImageTranslateUrl(requestUrl);
       const response = await gmRequest({
         method: "POST",
@@ -618,7 +635,7 @@
       });
       const summary = parseStreamSummary(response.response);
       if (summary.error) throw new Error(summary.error);
-      const host = normalizeHost(state.host);
+      const host = imageServiceBase();
       const resultUrl = summary.finalFolder ? `${host}/result/${encodeURIComponent(summary.finalFolder)}/final.png` : "";
       const resultPreviewUrl = resultUrl ? await previewUrlForImage(resultUrl) : "";
       updateAssistantHistory(entry.id, {
@@ -797,8 +814,8 @@
   }
 
   async function translateItem(item) {
-    const host = normalizeHost(state.host);
-    if (!host) throw new Error("请先填写 manga-image-translator Host。");
+    const requestUrl = imageTranslateUrl();
+    validateImageTranslateUrl(requestUrl);
 
     updateQueueItem(item.id, { status: "downloading", message: "下载原图中" });
     const file = await downloadImage(item);
@@ -810,7 +827,7 @@
 
     const response = await gmRequest({
       method: "POST",
-      url: `${host}/translate/with-form/image/stream/web`,
+      url: requestUrl,
       headers: authHeader(),
       data: form,
       responseType: "arraybuffer",
@@ -863,12 +880,8 @@
   }
 
   async function refreshResults() {
-    const host = normalizeHost(state.host);
-    if (!host) {
-      setMessage("请先填写 Host。");
-      return;
-    }
     try {
+      const host = imageServiceBase();
       const response = await gmRequest({
         method: "GET",
         url: `${host}/results/list`,
@@ -932,11 +945,6 @@
   }
 
   async function downloadZip() {
-    const host = normalizeHost(state.host);
-    if (!host) {
-      setMessage("请先填写 Host。");
-      return;
-    }
     const headers = authHeader();
     const name = zipDownloadName();
     const selected = state.queue
@@ -952,6 +960,7 @@
     }
 
     try {
+      const host = imageServiceBase();
       setMessage(`正在准备 ${name}...`);
       const prepareResponse = await gmRequest({
         method: "POST",
@@ -1035,10 +1044,19 @@
   function renderAssistantModal(item) {
     const title = item.title || item.sourceText || item.sourceUrl || "助手记录";
     const message = item.message ? `<div class="mit-modal-message mit-${escapeAttr(item.status || "done")}">${escapeHtml(item.message)}</div>` : "";
+    const lightbox = activeImagePreview ? `
+      <div class="mit-lightbox">
+        <div class="mit-lightbox-head">
+          <strong>${escapeHtml(activeImagePreview.title || "图片预览")}</strong>
+          <button data-action="closeBigImage">关闭大图</button>
+        </div>
+        <img src="${escapeAttr(activeImagePreview.src)}" alt="${escapeAttr(activeImagePreview.title || "image preview")}">
+      </div>
+    ` : "";
     let content = "";
     if (item.type === "image") {
       const result = item.resultUrl
-        ? `<img class="mit-preview-image" src="${escapeAttr(item.resultPreviewUrl || item.resultUrl)}" alt="translated image">
+        ? `<img class="mit-preview-image" data-action="openBigImage" data-title="译图" src="${escapeAttr(item.resultPreviewUrl || item.resultUrl)}" alt="translated image">
            <button data-action="downloadAssistantUrl" data-url="${escapeAttr(item.resultUrl)}" data-name="${escapeAttr(`${safeFileStem(title)}.png`)}">下载译图</button>`
         : `<div class="mit-muted">译图还没有返回。</div>`;
       content = `
@@ -1049,7 +1067,7 @@
           </div>
           <div>
             <strong>原图</strong>
-            ${item.sourceUrl ? `<img class="mit-preview-image" src="${escapeAttr(item.sourceUrl)}" alt="source image">
+            ${item.sourceUrl ? `<img class="mit-preview-image" data-action="openBigImage" data-title="原图" src="${escapeAttr(item.sourceUrl)}" alt="source image">
             <button data-action="downloadAssistantUrl" data-url="${escapeAttr(item.sourceUrl)}" data-name="${escapeAttr(fileNameFromUrl(item.sourceUrl, 1))}">下载原图</button>` : ""}
           </div>
         </div>
@@ -1082,6 +1100,7 @@
           </div>
           ${message}
           <div class="mit-modal-body">${content}</div>
+          ${lightbox}
         </div>
       </div>
     `;
@@ -1271,46 +1290,54 @@
           <button data-action="toggle">收起</button>
         </div>
         <div class="mit-body">
-          <label>ZIP name <input data-field="zipName" value="${escapeAttr(state.zipName)}"></label>
-          <label>Image blacklist <input data-field="imageBlacklist" value="${escapeAttr(state.imageBlacklist)}" placeholder="abc123.webp, cover.jpg"></label>
-          <div class="mit-actions mit-actions-compact">
-            <button data-action="detect">抓取图片</button>
-            <button data-action="translate" ${running ? "disabled" : ""}>翻译队列</button>
-            <button data-action="refresh">刷新状态</button>
-            <button data-action="download">下载 ZIP</button>
-            <button data-action="retry">失败重试</button>
-            <button data-action="clearDone">清除完成</button>
-            <button data-action="clearQueue">清空队列</button>
-          </div>
-          <div class="mit-summary">${escapeHtml(statusText())}</div>
-          <div class="mit-message">${escapeHtml(state.lastMessage || "")}</div>
-          <div class="mit-helper-head"><strong>批量队列</strong></div>
-          <div class="mit-list">${queuePreview || '<div class="mit-muted">还没有图片。点击“抓取图片”累计当前页图片。</div>'}</div>
-          <div class="mit-helper-head">
-            <strong>助手缓存</strong>
-            <button data-action="clearAssistantHistory">清空</button>
-          </div>
-          <div class="mit-assistant-list">${assistantHistory || '<div class="mit-muted">右键图片或选中文本后使用翻译助手。</div>'}</div>
           <details class="mit-section">
-            <summary>All 配置</summary>
+            <summary>HOST 维度</summary>
+            <label>ZIP name <input data-field="zipName" value="${escapeAttr(state.zipName)}"></label>
+            <label>Image blacklist <input data-field="imageBlacklist" value="${escapeAttr(state.imageBlacklist)}" placeholder="abc123.webp, cover.jpg"></label>
+          </details>
+          <details class="mit-section">
+            <summary>ALL 维度</summary>
+            <label>图片翻译接口 <input data-assistant-field="imageTranslatePath" value="${escapeAttr(assistant.imageTranslatePath)}" placeholder="http://host:11585/translate/with-form/image/stream/web"></label>
+            <label>文本翻译接口 <input data-assistant-field="textTranslatePath" value="${escapeAttr(assistant.textTranslatePath)}" placeholder="http://host:11586/v1/chat/completions"></label>
+            <label>TTS 接口 <input data-assistant-field="ttsPath" value="${escapeAttr(assistant.ttsPath)}" placeholder="http://host:11587/assistant/tts"></label>
             <label>图片翻译 Config JSON（批量队列和右键单图共用）<textarea data-field="configText" spellcheck="false">${escapeHtml(state.configText)}</textarea></label>
             <div class="mit-grid">
               <label>目标语言 <input data-assistant-field="textTargetLang" value="${escapeAttr(assistant.textTargetLang)}"></label>
               <label>TTS Voice <input data-assistant-field="ttsVoice" value="${escapeAttr(assistant.ttsVoice)}"></label>
             </div>
-            <label>文本/TTS 请求 JSON（OpenAI/Sakura 参数或自定义助手参数）<textarea data-assistant-field="requestJson" spellcheck="false">${escapeHtml(assistant.requestJson)}</textarea></label>
+            <label>文本请求 JSON（OpenAI/Sakura 参数）<textarea data-assistant-field="textRequestJson" spellcheck="false">${escapeHtml(assistant.textRequestJson)}</textarea></label>
+            <label>TTS 请求 JSON<textarea data-assistant-field="ttsRequestJson" spellcheck="false">${escapeHtml(assistant.ttsRequestJson)}</textarea></label>
           </details>
           <details class="mit-section">
-            <summary>Host 配置</summary>
-            <label>Host <input data-field="host" value="${escapeAttr(state.host)}" placeholder="https://your-mit-host"></label>
+            <summary>批量相关按钮</summary>
             <label class="mit-check"><input data-field="useBasicAuth" type="checkbox" ${state.useBasicAuth ? "checked" : ""}> Basic Auth</label>
             <div class="mit-grid">
               <label>User <input data-field="username" value="${escapeAttr(state.username)}"></label>
               <label>Pass <input data-field="password" type="password" value="${escapeAttr(state.password)}"></label>
             </div>
-            <label>图片翻译接口 <input data-assistant-field="imageTranslatePath" value="${escapeAttr(assistant.imageTranslatePath)}"></label>
-            <label>文本翻译接口 <input data-assistant-field="textTranslatePath" value="${escapeAttr(assistant.textTranslatePath)}"></label>
-            <label>TTS 接口 <input data-assistant-field="ttsPath" value="${escapeAttr(assistant.ttsPath)}"></label>
+            <div class="mit-actions mit-actions-compact">
+              <button data-action="detect">抓取图片</button>
+              <button data-action="translate" ${running ? "disabled" : ""}>翻译队列</button>
+              <button data-action="refresh">刷新状态</button>
+              <button data-action="download">下载 ZIP</button>
+              <button data-action="retry">失败重试</button>
+              <button data-action="clearDone">清除完成</button>
+              <button data-action="clearQueue">清空队列</button>
+            </div>
+            <div class="mit-summary">${escapeHtml(statusText())}</div>
+            <div class="mit-message">${escapeHtml(state.lastMessage || "")}</div>
+          </details>
+          <details class="mit-section">
+            <summary>批量队列</summary>
+            <div class="mit-list">${queuePreview || '<div class="mit-muted">还没有图片。点击“抓取图片”累计当前页图片。</div>'}</div>
+          </details>
+          <details class="mit-section">
+            <summary>助手缓存</summary>
+            <div class="mit-helper-head">
+              <strong>缓存记录</strong>
+              <button data-action="clearAssistantHistory">清空</button>
+            </div>
+            <div class="mit-assistant-list">${assistantHistory || '<div class="mit-muted">右键图片或选中文本后使用翻译助手。</div>'}</div>
           </details>
         </div>
       </div>
@@ -1338,6 +1365,7 @@
     root.querySelectorAll('[data-action="openAssistantItem"]').forEach((el) => {
       el.addEventListener("click", () => {
         activeModalId = el.dataset.id;
+        activeImagePreview = null;
         render();
       });
     });
@@ -1365,7 +1393,21 @@
     button('[data-action="clearAssistantHistory"]', clearAssistantHistory);
     button('[data-action="closeAssistantModal"]', () => {
       activeModalId = "";
+      activeImagePreview = null;
       render();
+    });
+    button('[data-action="closeBigImage"]', () => {
+      activeImagePreview = null;
+      render();
+    });
+    root.querySelectorAll('[data-action="openBigImage"]').forEach((el) => {
+      el.addEventListener("click", () => {
+        activeImagePreview = {
+          src: el.getAttribute("src") || "",
+          title: el.dataset.title || "图片预览",
+        };
+        render();
+      });
     });
     root.querySelectorAll('[data-action="downloadAssistantUrl"]').forEach((el) => {
       el.addEventListener("click", () => {
@@ -1660,6 +1702,7 @@
         background: rgba(15, 23, 42, 0.38);
       }
       #mit-submitter-root .mit-modal-panel {
+        position: relative;
         width: min(100%, 760px);
         max-height: calc(100dvh - 24px);
         display: flex;
@@ -1705,6 +1748,7 @@
         border: 1px solid #dbe3ea;
         border-radius: 6px;
         background: white;
+        cursor: zoom-in;
       }
       #mit-submitter-root .mit-text-block {
         max-height: 52dvh;
@@ -1723,6 +1767,32 @@
         padding: 6px 8px;
         border-radius: 6px;
         background: #e2e8f0;
+      }
+      #mit-submitter-root .mit-lightbox {
+        position: absolute;
+        inset: 0;
+        z-index: 2;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        gap: 8px;
+        padding: 10px;
+        background: #0f172a;
+        color: white;
+        border-radius: 8px;
+      }
+      #mit-submitter-root .mit-lightbox-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      #mit-submitter-root .mit-lightbox img {
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        object-fit: contain;
+        background: #020617;
+        border-radius: 6px;
       }
       @media (max-width: 520px), (max-height: 680px) {
         #mit-submitter-root {
