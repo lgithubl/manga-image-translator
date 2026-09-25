@@ -918,6 +918,35 @@
     return base.toLowerCase().endsWith(".zip") ? base : `${base}.zip`;
   }
 
+  function refreshZipNameFromRule(showMessage = true) {
+    const rule = String(state.zipNameSelector || "").trim();
+    if (!rule) {
+      if (showMessage) setMessage("ZIP name rule 为空。");
+      return false;
+    }
+    const extracted = extractZipNameFromSelector();
+    if (!extracted) {
+      if (showMessage) setMessage("没有匹配到 ZIP name。");
+      return false;
+    }
+    state.zipName = extracted;
+    saveState();
+    if (showMessage) setMessage(`已刷新 ZIP name: ${zipDownloadName()}`);
+    render();
+    return true;
+  }
+
+  function refreshZipNameFromRuleSoon() {
+    if (!String(state.zipNameSelector || "").trim()) return;
+    let attempts = 0;
+    const tryRefresh = () => {
+      attempts += 1;
+      if (refreshZipNameFromRule(false) || attempts >= 20) return;
+      window.setTimeout(tryRefresh, 250);
+    };
+    tryRefresh();
+  }
+
   function extractZipNameFromSelector() {
     const rule = String(state.zipNameSelector || "").trim();
     if (!rule) return "";
@@ -1350,7 +1379,10 @@
         <div class="mit-body">
           ${renderSection("host", "HOST 维度", `
             <label>ZIP name rule <input data-field="zipNameSelector" value="${escapeAttr(state.zipNameSelector)}" placeholder="CSS / selector::attr(alt) / jsonld:ComicStory.name"></label>
-            <label>ZIP name <input data-field="zipName" value="${escapeAttr(state.zipName)}"></label>
+            <div class="mit-inline-field">
+              <label>ZIP name <input data-field="zipName" value="${escapeAttr(state.zipName)}"></label>
+              <button data-action="refreshZipName" type="button">刷新</button>
+            </div>
             <label>Image blacklist <input data-field="imageBlacklist" value="${escapeAttr(state.imageBlacklist)}" placeholder="abc123.webp, cover.jpg"></label>
           `)}
           ${renderSection("all", "ALL 维度", `
@@ -1416,6 +1448,7 @@
     button('[data-action="detect"]', addDetectedImages);
     button('[data-action="translate"]', translateQueue);
     button('[data-action="refresh"]', refreshResults);
+    button('[data-action="refreshZipName"]', () => refreshZipNameFromRule(true));
     button('[data-action="download"]', downloadZip);
     button('[data-action="retry"]', retryErrors);
     button('[data-action="clearDone"]', clearDone);
@@ -1619,6 +1652,17 @@
         display: grid;
         grid-template-columns: 1fr 1fr;
         gap: 8px;
+      }
+      #mit-submitter-root .mit-inline-field {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 6px;
+        align-items: end;
+      }
+      #mit-submitter-root .mit-inline-field button {
+        min-height: 29px;
+        padding: 5px 8px;
+        white-space: nowrap;
       }
       #mit-submitter-root .mit-actions {
         display: grid;
@@ -2199,6 +2243,7 @@
     root.id = "mit-submitter-root";
     frameDocument.body.appendChild(root);
     render();
+    refreshZipNameFromRuleSoon();
     ["pointerenter", "pointerdown", "focusin"].forEach((type) => {
       root.addEventListener(type, () => ensureTopLayer(true), true);
     });
