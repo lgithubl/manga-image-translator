@@ -1290,7 +1290,10 @@
         <div class="mit-modal-panel">
           <div class="mit-modal-head">
             <strong>${escapeHtml(assistantTypeLabel(item.type))}: ${escapeHtml(shortText(title, 56))}</strong>
-            <button data-action="closeAssistantModal">关闭</button>
+            <div class="mit-modal-head-actions">
+              <button data-action="refreshAssistantModal">刷新</button>
+              <button data-action="closeAssistantModal">关闭</button>
+            </div>
           </div>
           ${message}
           <div class="mit-modal-body">${content}</div>
@@ -1616,6 +1619,7 @@
       el.addEventListener("change", updateAssistantField);
     });
     button('[data-action="clearAssistantHistory"]', clearAssistantHistory);
+    button('[data-action="refreshAssistantModal"]', render);
     button('[data-action="closeAssistantModal"]', () => {
       activeModalId = "";
       render();
@@ -1999,6 +2003,11 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      #mit-submitter-root .mit-modal-head-actions {
+        display: flex;
+        gap: 6px;
+        flex: 0 0 auto;
       }
       #mit-submitter-root .mit-modal-body {
         min-height: 0;
