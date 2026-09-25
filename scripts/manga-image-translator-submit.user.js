@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      1.0.0
+// @version      1.0.1
 // @description  Collect manga images, submit translations, and provide context-menu translation/TTS helpers.
 // @match        *://*/*
 // @run-at       document-start
@@ -92,9 +92,11 @@
   let menuContext = { imageUrl: "", text: "" };
   let activeModalId = "";
   const openSections = new Set();
+  const externalContextMenuActions = new Map();
   let contextMenuShownAt = 0;
   let contextMenuStickyUntil = 0;
   installEarlyPanelShield();
+  installExternalContextMenuBridge();
 
   function loadState() {
     try {
@@ -425,6 +427,53 @@
 
   function selectedPageText() {
     return String(window.getSelection?.() || "").trim();
+  }
+
+  function linkHrefFromTarget(target) {
+    const link = target?.closest?.("a[href]");
+    return link ? absoluteUrl(link.href || link.getAttribute("href") || "") : "";
+  }
+
+  function hasDownloadLinkText(text) {
+    return /magnet:\?|ed2k:\/\/|https?:\/\//i.test(String(text || ""));
+  }
+
+  function installExternalContextMenuBridge() {
+    window.addEventListener("mit-context-menu-register", (event) => {
+      const detail = event.detail || {};
+      const id = String(detail.id || "").trim();
+      const label = String(detail.label || "").trim();
+      if (!id || !label) return;
+      externalContextMenuActions.set(id, {
+        id,
+        label,
+        title: String(detail.title || label),
+        match: detail.match || "always",
+        priority: Number(detail.priority || 0),
+        source: String(detail.source || ""),
+      });
+    });
+    window.addEventListener("mit-context-menu-unregister", (event) => {
+      const id = String(event.detail?.id || "").trim();
+      if (id) externalContextMenuActions.delete(id);
+    });
+    window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent("mit-context-menu-ready", {
+        detail: { version: "1", source: "manga-image-translator" },
+      }));
+    }, 0);
+  }
+
+  function getExternalContextMenuActions(context) {
+    const text = [context.text, context.linkHref].filter(Boolean).join("\n");
+    return Array.from(externalContextMenuActions.values())
+      .filter((action) => {
+        if (action.match === "downloadLinks") return hasDownloadLinkText(text);
+        if (action.match === "image") return Boolean(context.imageUrl);
+        if (action.match === "text") return Boolean(context.text);
+        return true;
+      })
+      .sort((left, right) => right.priority - left.priority || left.label.localeCompare(right.label));
   }
 
   function shortText(text, max = 48) {
@@ -2240,6 +2289,8 @@
       <div class="mit-menu-sep" data-menu-image-sep></div>
       <button type="button" role="menuitem" data-menu-action="translateText">翻译中文</button>
       <button type="button" role="menuitem" data-menu-action="speakText">文本转语音</button>
+      <div class="mit-menu-sep" data-menu-external-sep></div>
+      <div data-menu-external-actions></div>
     `;
     (document.body || document.documentElement).appendChild(contextMenu);
     ["pointerdown", "mousedown", "mouseup", "click", "auxclick", "touchstart", "touchend", "contextmenu"].forEach((type) => {
@@ -2256,6 +2307,15 @@
     const buttonEl = event.target?.closest?.("[data-menu-action]");
     if (!buttonEl || buttonEl.style.display === "none") return;
     event.preventDefault();
+    if (buttonEl.dataset.menuExternalAction) {
+      const context = { ...menuContext };
+      const id = buttonEl.dataset.menuExternalAction;
+      hideContextMenu();
+      window.dispatchEvent(new CustomEvent("mit-context-menu-action", {
+        detail: { id, context, source: "manga-image-translator" },
+      }));
+      return;
+    }
     const action = buttonEl.dataset.menuAction;
     const context = { ...menuContext };
     hideContextMenu();
@@ -2270,10 +2330,14 @@
     menuContext = {
       imageUrl: context.imageUrl || "",
       text: context.text || "",
+      linkHref: context.linkHref || "",
+      pageUrl: location.href,
     };
     const imageButton = menu.querySelector('[data-menu-action="translateImage"]');
     const imageSep = menu.querySelector("[data-menu-image-sep]");
     const textSep = menu.querySelector("[data-menu-text-sep]");
+    const externalSep = menu.querySelector("[data-menu-external-sep]");
+    const externalActions = menu.querySelector("[data-menu-external-actions]");
     const textButtons = menu.querySelectorAll('[data-menu-action="translateAndSpeakText"], [data-menu-action="translateText"], [data-menu-action="speakText"]');
     imageButton.style.display = menuContext.imageUrl ? "block" : "none";
     textSep.style.display = menuContext.text ? "block" : "none";
@@ -2281,6 +2345,19 @@
     textButtons.forEach((buttonEl) => {
       buttonEl.style.display = menuContext.text ? "block" : "none";
     });
+    const external = getExternalContextMenuActions(menuContext);
+    externalActions.replaceChildren(...external.map((action) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.role = "menuitem";
+      button.dataset.menuAction = "external";
+      button.dataset.menuExternalAction = action.id;
+      button.title = action.title || action.label;
+      button.textContent = action.label;
+      return button;
+    }));
+    externalSep.style.display = external.length ? "block" : "none";
+    externalActions.style.display = external.length ? "block" : "none";
     menu.style.display = "block";
     contextMenuShownAt = Date.now();
     contextMenuStickyUntil = contextMenuShownAt + 5000;
@@ -2319,11 +2396,12 @@
       const image = target?.closest?.("img");
       const imageUrl = image ? imageUrlFromElement(image) : "";
       const text = selectedPageText();
-      if (!imageUrl && !text) return;
+      const linkHref = linkHrefFromTarget(target);
+      if (!imageUrl && !text && !linkHref) return;
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
-      showContextMenu(event, { imageUrl, text });
+      showContextMenu(event, { imageUrl, text, linkHref });
       ensureTopLayer(true);
     }, true);
     ["pointerdown", "click", "keydown", "scroll", "resize"].forEach((type) => {
