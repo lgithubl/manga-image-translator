@@ -5,6 +5,7 @@
 
   function formatBytes(value) {
     const size = Number(value || 0);
+    if (!size) return "";
     if (size < 1024) return `${size} B`;
     const units = ["KB", "MB", "GB", "TB"];
     let scaled = size / 1024;
@@ -29,6 +30,15 @@
     return `${String(base || "").replace(/\/+$/, "")}${path}`;
   }
 
+  function encodePath(path) {
+    const bytes = new TextEncoder().encode(path);
+    let binary = "";
+    bytes.forEach((byte) => {
+      binary += String.fromCharCode(byte);
+    });
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
   async function requestJson(url, options) {
     const response = await fetch(url, options);
     if (!response.ok) {
@@ -45,6 +55,7 @@
     const config = {
       apiBase: options.apiBase || location.origin,
       uploadEnabled: options.uploadEnabled !== false,
+      tracks: Array.isArray(options.tracks) ? options.tracks : null,
     };
     const state = {
       files: [],
@@ -54,7 +65,19 @@
     };
 
     function streamUrl(file) {
-      return joinUrl(config.apiBase, `/api/files/${encodeURIComponent(file.id)}/stream`);
+      const encodedPath = file.id || encodePath(file.path || "");
+      return joinUrl(config.apiBase, `/api/stream/${encodeURIComponent(encodedPath)}`);
+    }
+
+    function normalizeTrack(track) {
+      const path = track.path || track.filePath || "";
+      return {
+        id: track.id || (path ? encodePath(path) : ""),
+        name: track.name || track.title || (path ? path.split(/[\\/]/).pop() : "audio"),
+        path,
+        size: track.size || 0,
+        contentType: track.contentType || "",
+      };
     }
 
     function render() {
@@ -78,7 +101,7 @@
               <div class="aw-row">
                 <span class="aw-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</span>
                 <span class="aw-meta">${escapeHtml(formatBytes(file.size))}</span>
-                <button class="aw-button" data-aw-play="${escapeHtml(file.name)}">Play</button>
+                <button class="aw-button" data-aw-play="${escapeHtml(file.id)}">Play</button>
               </div>
             `).join("") || '<div class="aw-message">No audio files yet.</div>'}
           </section>
@@ -89,7 +112,7 @@
       root.querySelector("[data-aw-upload]")?.addEventListener("click", upload);
       root.querySelectorAll("[data-aw-play]").forEach((button) => {
         button.addEventListener("click", () => {
-          state.selected = state.files.find((file) => file.name === button.dataset.awPlay) || null;
+          state.selected = state.files.find((file) => file.id === button.dataset.awPlay) || null;
           render();
         });
       });
@@ -100,9 +123,13 @@
       state.message = "Loading files...";
       render();
       try {
-        const data = await requestJson(joinUrl(config.apiBase, "/api/files"));
-        state.files = (data.files || []).filter((file) => AUDIO_EXTENSIONS.test(file.name || ""));
-        if (state.selected && !state.files.some((file) => file.name === state.selected.name)) {
+        if (config.tracks) {
+          state.files = config.tracks.map(normalizeTrack).filter((file) => file.id && AUDIO_EXTENSIONS.test(file.name || file.path || ""));
+        } else {
+          const data = await requestJson(joinUrl(config.apiBase, "/api/files"));
+          state.files = (data.files || []).filter((file) => AUDIO_EXTENSIONS.test(file.name || ""));
+        }
+        if (state.selected && !state.files.some((file) => file.id === state.selected.id)) {
           state.selected = null;
         }
         state.message = `Loaded ${state.files.length} audio file(s).`;

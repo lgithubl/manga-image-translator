@@ -25,15 +25,19 @@ Open `http://127.0.0.1:8080`.
 <div id="audio-widget"></div>
 <script src="/audio-widget.js"></script>
 <script>
-  AudioWidget.mount("#audio-widget", {
-    apiBase: "http://127.0.0.1:8080",
-    uploadEnabled: true
-  });
+AudioWidget.mount("#audio-widget", {
+  apiBase: "http://127.0.0.1:8080",
+  tracks: [
+    { name: "example.mp3", path: "/absolute/path/to/example.mp3" }
+  ],
+  uploadEnabled: true
+});
 </script>
 ```
 
 External sites can host `audio-widget.js` and `audio-widget.css` themselves, or
 load them from this backend. Only `apiBase` has to point at the deployed backend.
+If the upper layer already encoded the path, pass it as `id` instead of `path`.
 
 ## Docker
 
@@ -50,12 +54,14 @@ ghcr.io/lgithubl/manga-image-translator:audio-widget-latest
 ## API
 
 - `GET /health`
-- `GET /api/files`
-- `GET /api/files/{id}`
+- `GET /api/stream/{base64urlPath}`
+- `GET /api/meta/{base64urlPath}`
 - `POST /api/upload` with multipart field `file`
-- `GET /api/files/{id}/stream` with HTTP Range support
+- `GET /api/files` for demo uploads
 
-The included backend is a deployable baseline service: it keeps a SQLite file
-index, stores uploaded audio under `/data/uploads`, and streams files with HTTP
-Range support. Production installations should still put auth, quotas, backups,
-and external object storage in front when needed.
+The included backend is a stateless streaming service. The upper layer owns
+security, indexes, permissions, and metadata. The backend accepts a base64url
+encoded absolute file path and streams that file with HTTP Range support.
+
+Demo uploads are still available and are stored under `/data/uploads`, but they
+are not the production data model.

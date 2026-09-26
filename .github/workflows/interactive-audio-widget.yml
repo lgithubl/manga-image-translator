@@ -80,7 +80,7 @@ jobs:
           print(json.load(open("${{ runner.temp }}/audio-widget-upload.json"))["id"])
           PY
           )"
-          curl -fsS -H "Range: bytes=0-31" "http://127.0.0.1:8080/api/files/$FILE_ID/stream" >/tmp/smoke-range.bin
+          curl -fsS -H "Range: bytes=0-31" "http://127.0.0.1:8080/api/stream/$FILE_ID" >/tmp/smoke-range.bin
           test "$(wc -c </tmp/smoke-range.bin)" -eq 32
 
       - name: Start authenticated proxy
