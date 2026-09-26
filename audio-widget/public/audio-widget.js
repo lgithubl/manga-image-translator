@@ -55,7 +55,8 @@
 
     const config = {
       apiBase: options.apiBase || location.origin,
-      uploadEnabled: options.uploadEnabled !== false,
+      autoUploadEnabled: typeof options.uploadEnabled !== "boolean",
+      uploadEnabled: typeof options.uploadEnabled === "boolean" ? options.uploadEnabled : false,
       tracks: Array.isArray(options.tracks) ? options.tracks : null,
     };
     const state = {
@@ -129,6 +130,10 @@
       state.message = "Loading files...";
       render();
       try {
+        if (config.autoUploadEnabled) {
+          const health = await requestJson(joinUrl(config.apiBase, "/health"));
+          config.uploadEnabled = !!health.uploadEnabled;
+        }
         if (config.tracks) {
           state.files = config.tracks.map(normalizeTrack).filter((file) => file.id && MEDIA_EXTENSIONS.test(file.name || file.path || ""));
         } else {
