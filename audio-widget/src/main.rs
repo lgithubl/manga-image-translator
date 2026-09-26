@@ -46,6 +46,7 @@ struct AppState {
     data_dir: Arc<PathBuf>,
     upload_dir: Arc<PathBuf>,
     stats: Arc<Stats>,
+    sendfile_enabled: bool,
     initial_chunk_bytes: usize,
     read_chunk_bytes: usize,
     prefetch_bytes: u64,
@@ -101,6 +102,12 @@ struct Stats {
     prefetch_errors: AtomicU64,
     prefetch_bytes: AtomicU64,
     prefetch_read_us_total: AtomicU64,
+    sendfile_requests: AtomicU64,
+    sendfile_bytes: AtomicU64,
+    sendfile_calls: AtomicU64,
+    sendfile_us_total: AtomicU64,
+    sendfile_us_max: AtomicU64,
+    userspace_stream_requests: AtomicU64,
 }
 
 impl Stats {
@@ -156,6 +163,12 @@ impl Stats {
         self.prefetch_errors.store(0, Ordering::Relaxed);
         self.prefetch_bytes.store(0, Ordering::Relaxed);
         self.prefetch_read_us_total.store(0, Ordering::Relaxed);
+        self.sendfile_requests.store(0, Ordering::Relaxed);
+        self.sendfile_bytes.store(0, Ordering::Relaxed);
+        self.sendfile_calls.store(0, Ordering::Relaxed);
+        self.sendfile_us_total.store(0, Ordering::Relaxed);
+        self.sendfile_us_max.store(0, Ordering::Relaxed);
+        self.userspace_stream_requests.store(0, Ordering::Relaxed);
     }
 }
 
@@ -263,6 +276,7 @@ async fn main() -> Result<()> {
         MIN_INITIAL_CHUNK_BYTES,
         read_chunk_bytes,
     );
+    let sendfile_enabled = sendfile_supported() && env_bool("AUDIO_WIDGET_SENDFILE_ENABLED", false);
     let prefetch_max_tasks = env_usize(
         "AUDIO_WIDGET_PREFETCH_MAX_TASKS",
         DEFAULT_PREFETCH_MAX_TASKS,
@@ -278,6 +292,7 @@ async fn main() -> Result<()> {
         data_dir: Arc::new(data_dir),
         upload_dir: Arc::new(upload_dir),
         stats: Arc::new(Stats::new()),
+        sendfile_enabled,
         initial_chunk_bytes,
         read_chunk_bytes,
         prefetch_bytes: env_u64("AUDIO_WIDGET_PREFETCH_BYTES", 0, 0, MAX_PREFETCH_BYTES),
@@ -285,6 +300,21 @@ async fn main() -> Result<()> {
         prefetch_semaphore: Arc::new(Semaphore::new(prefetch_max_tasks)),
         prefetch_paths: Arc::new(Mutex::new(HashSet::new())),
     };
+
+    let host = env::var("AUDIO_WIDGET_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let port = env::var("AUDIO_WIDGET_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(8080);
+    let addr: SocketAddr = format!("{host}:{port}")
+        .parse()
+        .context("parse bind address")?;
+    if state.sendfile_enabled {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            return run_sendfile_http(state, public_dir, addr).await;
+        }
+    }
 
     let app = Router::new()
         .route("/health", get(health))
@@ -321,14 +351,6 @@ async fn main() -> Result<()> {
         )
         .with_state(state);
 
-    let host = env::var("AUDIO_WIDGET_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-    let port = env::var("AUDIO_WIDGET_PORT")
-        .ok()
-        .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(8080);
-    let addr: SocketAddr = format!("{host}:{port}")
-        .parse()
-        .context("parse bind address")?;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .context("bind server")?;
@@ -341,6 +363,7 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "ok": true,
         "mode": "path-stream",
         "runtime": "rust",
+        "sendfileEnabled": state.sendfile_enabled,
         "dataDir": state.data_dir.to_string_lossy(),
         "initialChunkBytes": state.initial_chunk_bytes,
         "readChunkBytes": state.read_chunk_bytes,
@@ -354,6 +377,8 @@ async fn config(State(state): State<AppState>) -> Json<serde_json::Value> {
         "apiVersion": "0.3.0",
         "mode": "path-stream",
         "runtime": "rust",
+        "sendfileSupported": sendfile_supported(),
+        "sendfileEnabled": state.sendfile_enabled,
         "initialChunkBytes": state.initial_chunk_bytes,
         "readChunkBytes": state.read_chunk_bytes,
         "prefetchBytes": state.prefetch_bytes,
@@ -483,6 +508,10 @@ async fn stream_path(
 ) -> Result<Response, AppError> {
     let request_started = Instant::now();
     state.stats.stream_requests.fetch_add(1, Ordering::Relaxed);
+    state
+        .stats
+        .userspace_stream_requests
+        .fetch_add(1, Ordering::Relaxed);
     let active = state.stats.stream_active.fetch_add(1, Ordering::Relaxed) + 1;
     atomic_max(&state.stats.stream_active_max, active);
     if method == Method::HEAD {
@@ -851,6 +880,8 @@ fn stats_snapshot(state: &AppState) -> serde_json::Value {
         "startedAtUnix": started_at,
         "uptimeSeconds": now_unix().saturating_sub(started_at),
         "config": {
+            "sendfileSupported": sendfile_supported(),
+            "sendfileEnabled": state.sendfile_enabled,
             "initialChunkBytes": state.initial_chunk_bytes,
             "readChunkBytes": state.read_chunk_bytes,
             "prefetchBytes": state.prefetch_bytes,
@@ -864,6 +895,8 @@ fn stats_snapshot(state: &AppState) -> serde_json::Value {
         },
         "stream": {
             "requests": stream_requests,
+            "userspaceRequests": stats.userspace_stream_requests.load(Ordering::Relaxed),
+            "sendfileRequests": stats.sendfile_requests.load(Ordering::Relaxed),
             "active": stats.stream_active.load(Ordering::Relaxed),
             "activeMax": stats.stream_active_max.load(Ordering::Relaxed),
             "headRequests": stats.stream_head_requests.load(Ordering::Relaxed),
@@ -909,6 +942,16 @@ fn stats_snapshot(state: &AppState) -> serde_json::Value {
             "skippedBusy": stats.prefetch_skipped_busy.load(Ordering::Relaxed),
             "avgBytes": avg_u64(stats.prefetch_bytes.load(Ordering::Relaxed), prefetch_completed),
             "avgReadUs": avg_u64(stats.prefetch_read_us_total.load(Ordering::Relaxed), prefetch_completed),
+        },
+        "sendfile": {
+            "supported": sendfile_supported(),
+            "enabled": state.sendfile_enabled,
+            "requests": stats.sendfile_requests.load(Ordering::Relaxed),
+            "bytes": stats.sendfile_bytes.load(Ordering::Relaxed),
+            "calls": stats.sendfile_calls.load(Ordering::Relaxed),
+            "avgBytesPerCall": avg_u64(stats.sendfile_bytes.load(Ordering::Relaxed), stats.sendfile_calls.load(Ordering::Relaxed)),
+            "avgCallUs": avg_u64(stats.sendfile_us_total.load(Ordering::Relaxed), stats.sendfile_calls.load(Ordering::Relaxed)),
+            "maxCallUs": stats.sendfile_us_max.load(Ordering::Relaxed),
         }
     })
 }
@@ -960,6 +1003,22 @@ fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
         .and_then(|value| value.parse::<u64>().ok())
         .map(|value| value.clamp(min, max))
         .unwrap_or(default)
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
+}
+
+fn sendfile_supported() -> bool {
+    cfg!(all(target_os = "linux", target_arch = "x86_64"))
 }
 
 fn safe_name(value: &str) -> String {
@@ -1132,4 +1191,682 @@ fn parse_range(range_header: Option<&str>, total: u64) -> Result<(StatusCode, u6
         );
     }
     Ok((StatusCode::PARTIAL_CONTENT, start, end))
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+async fn run_sendfile_http(state: AppState, public_dir: PathBuf, addr: SocketAddr) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .context("bind sendfile server")?;
+    loop {
+        let (stream, _) = listener
+            .accept()
+            .await
+            .context("accept sendfile connection")?;
+        let state = state.clone();
+        let public_dir = public_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Ok(stream) = stream.into_std() {
+                let _ = stream.set_nonblocking(false);
+                let _ = handle_sendfile_connection(stream, state, public_dir);
+            }
+        });
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+struct SimpleRequest {
+    method: String,
+    path: String,
+    headers: std::collections::HashMap<String, String>,
+    body: Vec<u8>,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn handle_sendfile_connection(
+    mut stream: std::net::TcpStream,
+    state: AppState,
+    public_dir: PathBuf,
+) -> std::io::Result<()> {
+    let request = match read_simple_request(&mut stream) {
+        Ok(request) => request,
+        Err(_) => {
+            write_text_response(&mut stream, StatusCode::BAD_REQUEST, "bad request\n")?;
+            return Ok(());
+        }
+    };
+    let path = request.path.split('?').next().unwrap_or("/").to_string();
+    match (request.method.as_str(), path.as_str()) {
+        ("OPTIONS", _) => write_empty_response(&mut stream, StatusCode::NO_CONTENT),
+        ("GET", "/health") => write_json_response(&mut stream, health_json(&state)),
+        ("GET", "/api/config") => write_json_response(&mut stream, config_json(&state)),
+        ("GET", "/api/stats") => write_json_response(&mut stream, stats_snapshot(&state)),
+        ("POST", "/api/stats/reset") => {
+            state.stats.reset();
+            write_json_response(&mut stream, stats_snapshot(&state))
+        }
+        ("GET", "/api/files") => {
+            state
+                .stats
+                .file_list_requests
+                .fetch_add(1, Ordering::Relaxed);
+            write_json_response(
+                &mut stream,
+                serde_json::json!({ "files": list_demo_uploads_sync(&state.upload_dir) }),
+            )
+        }
+        ("POST", "/api/upload") | ("POST", "/upload") => {
+            handle_sendfile_upload(&mut stream, &state, &request)
+        }
+        ("GET", "/") => send_static_file(&mut stream, &public_dir.join("index.html"), false),
+        ("GET", "/audio-widget.js") => {
+            send_static_file(&mut stream, &public_dir.join("audio-widget.js"), false)
+        }
+        ("GET", "/audio-widget.css") => {
+            send_static_file(&mut stream, &public_dir.join("audio-widget.css"), false)
+        }
+        ("HEAD", _) if path.starts_with("/api/stream/") => {
+            handle_sendfile_stream(&mut stream, &state, &request, true)
+        }
+        ("GET", _) if path.starts_with("/api/stream/") => {
+            handle_sendfile_stream(&mut stream, &state, &request, false)
+        }
+        ("HEAD", _) if path.starts_with("/files/") && path.ends_with("/stream") => {
+            handle_sendfile_stream(&mut stream, &state, &request, true)
+        }
+        ("GET", _) if path.starts_with("/files/") && path.ends_with("/stream") => {
+            handle_sendfile_stream(&mut stream, &state, &request, false)
+        }
+        ("GET", _) if path.starts_with("/api/meta/") => {
+            let encoded = path.trim_start_matches("/api/meta/");
+            match ensure_streamable_path_sync(encoded).and_then(file_meta_sync) {
+                Ok(meta) => {
+                    write_json_response(&mut stream, serde_json::to_value(meta).unwrap_or_default())
+                }
+                Err(error) => write_json_error(&mut stream, error.status, &error.detail),
+            }
+        }
+        ("GET", _) if path.starts_with("/assets/") => {
+            let relative = path.trim_start_matches("/assets/").trim_start_matches('/');
+            let target = public_dir.join(relative);
+            match target.canonicalize() {
+                Ok(canonical) if canonical.starts_with(&public_dir) => {
+                    send_static_file(&mut stream, &canonical, false)
+                }
+                _ => write_json_error(&mut stream, StatusCode::NOT_FOUND, "asset not found"),
+            }
+        }
+        _ => write_json_error(&mut stream, StatusCode::NOT_FOUND, "not found"),
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn read_simple_request(stream: &mut std::net::TcpStream) -> std::io::Result<SimpleRequest> {
+    use std::io::Read;
+
+    let mut buffer = Vec::with_capacity(8192);
+    let mut temp = [0_u8; 4096];
+    let header_end = loop {
+        let read = stream.read(&mut temp)?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "eof",
+            ));
+        }
+        buffer.extend_from_slice(&temp[..read]);
+        if let Some(index) = find_bytes(&buffer, b"\r\n\r\n") {
+            break index + 4;
+        }
+        if buffer.len() > 64 * 1024 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "headers too large",
+            ));
+        }
+    };
+    let headers_text = String::from_utf8_lossy(&buffer[..header_end]);
+    let mut lines = headers_text.split("\r\n");
+    let request_line = lines.next().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "missing request line")
+    })?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next().unwrap_or("").to_string();
+    let path = request_parts.next().unwrap_or("/").to_string();
+    let mut headers = std::collections::HashMap::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+    }
+    let content_length = headers
+        .get("content-length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut body = buffer[header_end..].to_vec();
+    while body.len() < content_length {
+        let read = stream.read(&mut temp)?;
+        if read == 0 {
+            break;
+        }
+        body.extend_from_slice(&temp[..read]);
+    }
+    body.truncate(content_length);
+    Ok(SimpleRequest {
+        method,
+        path,
+        headers,
+        body,
+    })
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn handle_sendfile_stream(
+    stream: &mut std::net::TcpStream,
+    state: &AppState,
+    request: &SimpleRequest,
+    is_head: bool,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+
+    let request_started = Instant::now();
+    state.stats.stream_requests.fetch_add(1, Ordering::Relaxed);
+    state
+        .stats
+        .sendfile_requests
+        .fetch_add(1, Ordering::Relaxed);
+    let active = state.stats.stream_active.fetch_add(1, Ordering::Relaxed) + 1;
+    atomic_max(&state.stats.stream_active_max, active);
+    if is_head {
+        state
+            .stats
+            .stream_head_requests
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    let encoded = encoded_from_stream_path(&request.path);
+    let Some(encoded) = encoded else {
+        record_stream_status(&state.stats, StatusCode::NOT_FOUND);
+        state.stats.stream_errors.fetch_add(1, Ordering::Relaxed);
+        state.stats.stream_active.fetch_sub(1, Ordering::Relaxed);
+        return write_json_error(stream, StatusCode::NOT_FOUND, "not found");
+    };
+    let path = match ensure_streamable_path_sync(encoded) {
+        Ok(path) => path,
+        Err(error) => {
+            record_stream_status(&state.stats, error.status);
+            state.stats.stream_errors.fetch_add(1, Ordering::Relaxed);
+            state.stats.stream_active.fetch_sub(1, Ordering::Relaxed);
+            return write_json_error(stream, error.status, &error.detail);
+        }
+    };
+    let metadata = match std::fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            record_stream_status(&state.stats, StatusCode::NOT_FOUND);
+            state.stats.stream_errors.fetch_add(1, Ordering::Relaxed);
+            state.stats.stream_active.fetch_sub(1, Ordering::Relaxed);
+            return write_json_error(stream, StatusCode::NOT_FOUND, "media file not found");
+        }
+    };
+    let total = metadata.len();
+    let range_header = request.headers.get("range").map(String::as_str);
+    if range_header.is_some() {
+        state
+            .stats
+            .stream_range_requests
+            .fetch_add(1, Ordering::Relaxed);
+    } else {
+        state
+            .stats
+            .stream_full_requests
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    let (status, start, end) = match parse_range(range_header, total) {
+        Ok(range) => range,
+        Err(error) => {
+            record_stream_status(&state.stats, error.status);
+            state.stats.stream_errors.fetch_add(1, Ordering::Relaxed);
+            state.stats.stream_active.fetch_sub(1, Ordering::Relaxed);
+            return write_json_error(stream, error.status, &error.detail);
+        }
+    };
+    let length = end
+        .saturating_sub(start)
+        .saturating_add(if total == 0 { 0 } else { 1 });
+    state
+        .stats
+        .stream_requested_bytes
+        .fetch_add(length, Ordering::Relaxed);
+    let content_type = mime_guess::from_path(&path)
+        .first_or_octet_stream()
+        .to_string();
+    let mut headers = vec![
+        ("Accept-Ranges".to_string(), "bytes".to_string()),
+        ("Cache-Control".to_string(), "no-store".to_string()),
+        ("Content-Type".to_string(), content_type),
+        ("Content-Length".to_string(), length.to_string()),
+        ("Connection".to_string(), "close".to_string()),
+        (
+            "X-Media-Path-Encoded".to_string(),
+            encode_path(path.to_string_lossy().as_ref()),
+        ),
+    ];
+    if status == StatusCode::PARTIAL_CONTENT {
+        headers.push((
+            "Content-Range".to_string(),
+            format!("bytes {start}-{end}/{total}"),
+        ));
+    }
+    write_response_head(stream, status, &headers)?;
+    record_stream_status(&state.stats, status);
+    let setup_us = elapsed_us(request_started);
+    state
+        .stats
+        .stream_setup_us_total
+        .fetch_add(setup_us, Ordering::Relaxed);
+    atomic_max(&state.stats.stream_setup_us_max, setup_us);
+    if is_head || length == 0 {
+        complete_stream(&state.stats, request_started);
+        return Ok(());
+    }
+
+    let open_started = Instant::now();
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(_) => {
+            state.stats.stream_errors.fetch_add(1, Ordering::Relaxed);
+            state.stats.stream_active.fetch_sub(1, Ordering::Relaxed);
+            return Ok(());
+        }
+    };
+    let open_us = elapsed_us(open_started);
+    state
+        .stats
+        .stream_open_us_total
+        .fetch_add(open_us, Ordering::Relaxed);
+    atomic_max(&state.stats.stream_open_us_max, open_us);
+
+    let out_fd = stream.as_raw_fd();
+    let in_fd = file.as_raw_fd();
+    let mut offset = start as libc::off_t;
+    let mut remaining = length;
+    let mut first = true;
+    while remaining > 0 {
+        let to_send = remaining.min(state.read_chunk_bytes as u64) as usize;
+        let call_started = Instant::now();
+        let sent = unsafe { libc::sendfile(out_fd, in_fd, &mut offset, to_send) };
+        let call_us = elapsed_us(call_started);
+        state
+            .stats
+            .sendfile_us_total
+            .fetch_add(call_us, Ordering::Relaxed);
+        atomic_max(&state.stats.sendfile_us_max, call_us);
+        state.stats.sendfile_calls.fetch_add(1, Ordering::Relaxed);
+        if sent < 0 {
+            let error = std::io::Error::last_os_error();
+            if matches!(error.raw_os_error(), Some(libc::EINTR) | Some(libc::EAGAIN)) {
+                continue;
+            }
+            state.stats.stream_canceled.fetch_add(1, Ordering::Relaxed);
+            state.stats.stream_active.fetch_sub(1, Ordering::Relaxed);
+            return Ok(());
+        }
+        if sent == 0 {
+            break;
+        }
+        let sent = sent as u64;
+        if first {
+            let first_chunk_us = elapsed_us(request_started);
+            state
+                .stats
+                .stream_first_chunk_us_total
+                .fetch_add(first_chunk_us, Ordering::Relaxed);
+            atomic_max(&state.stats.stream_first_chunk_us_max, first_chunk_us);
+            if first_chunk_us >= SLOW_FIRST_CHUNK_US {
+                state
+                    .stats
+                    .stream_slow_first_chunk
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            first = false;
+        }
+        state.stats.stream_bytes.fetch_add(sent, Ordering::Relaxed);
+        state
+            .stats
+            .sendfile_bytes
+            .fetch_add(sent, Ordering::Relaxed);
+        state.stats.stream_chunks.fetch_add(1, Ordering::Relaxed);
+        state
+            .stats
+            .stream_read_us_total
+            .fetch_add(call_us, Ordering::Relaxed);
+        atomic_max(&state.stats.stream_read_us_max, call_us);
+        remaining = remaining.saturating_sub(sent);
+    }
+    stream.flush()?;
+    complete_stream(&state.stats, request_started);
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn encoded_from_stream_path(path: &str) -> Option<&str> {
+    if let Some(encoded) = path.strip_prefix("/api/stream/") {
+        return Some(encoded);
+    }
+    path.strip_prefix("/files/")
+        .and_then(|rest| rest.strip_suffix("/stream"))
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn handle_sendfile_upload(
+    stream: &mut std::net::TcpStream,
+    state: &AppState,
+    request: &SimpleRequest,
+) -> std::io::Result<()> {
+    state.stats.upload_requests.fetch_add(1, Ordering::Relaxed);
+    let content_type = request
+        .headers
+        .get("content-type")
+        .map(String::as_str)
+        .unwrap_or("");
+    let Some(boundary) = content_type
+        .split(';')
+        .map(str::trim)
+        .find_map(|part| part.strip_prefix("boundary="))
+    else {
+        return write_json_error(
+            stream,
+            StatusCode::BAD_REQUEST,
+            "multipart boundary is required",
+        );
+    };
+    let marker = format!("--{boundary}").into_bytes();
+    let Some(marker_start) = find_bytes(&request.body, &marker) else {
+        return write_json_error(
+            stream,
+            StatusCode::BAD_REQUEST,
+            "multipart file is required",
+        );
+    };
+    let part_start = marker_start + marker.len();
+    let part = request.body.get(part_start..).unwrap_or_default();
+    let Some(header_end) = find_bytes(part, b"\r\n\r\n") else {
+        return write_json_error(stream, StatusCode::BAD_REQUEST, "invalid multipart file");
+    };
+    let part_headers = String::from_utf8_lossy(&part[..header_end]);
+    if !part_headers.contains("name=\"file\"") {
+        return write_json_error(stream, StatusCode::BAD_REQUEST, "file field is required");
+    }
+    let filename = part_headers
+        .split("filename=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .map(safe_name)
+        .unwrap_or_else(|| "upload".to_string());
+    if !is_media_name(Path::new(&filename)) {
+        return write_json_error(
+            stream,
+            StatusCode::BAD_REQUEST,
+            "unsupported media extension",
+        );
+    }
+    let mut data = &part[header_end + 4..];
+    if let Some(end) = find_bytes(data, &marker) {
+        data = &data[..end];
+    }
+    if data.ends_with(b"\r\n") {
+        data = &data[..data.len().saturating_sub(2)];
+    }
+    let target = unique_upload_path_sync(&state.upload_dir, &filename)?;
+    std::fs::write(&target, data)?;
+    state
+        .stats
+        .upload_bytes
+        .fetch_add(data.len() as u64, Ordering::Relaxed);
+    let canonical = target.canonicalize()?;
+    match file_meta_sync(canonical) {
+        Ok(meta) => write_json_response(stream, serde_json::to_value(meta).unwrap_or_default()),
+        Err(error) => write_json_error(stream, error.status, &error.detail),
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn send_static_file(
+    stream: &mut std::net::TcpStream,
+    path: &Path,
+    is_head: bool,
+) -> std::io::Result<()> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        _ => return write_json_error(stream, StatusCode::NOT_FOUND, "file not found"),
+    };
+    let content_type = mime_guess::from_path(path)
+        .first_or_octet_stream()
+        .to_string();
+    let headers = vec![
+        ("Content-Type".to_string(), content_type),
+        ("Content-Length".to_string(), metadata.len().to_string()),
+        ("Connection".to_string(), "close".to_string()),
+    ];
+    write_response_head(stream, StatusCode::OK, &headers)?;
+    if is_head {
+        return Ok(());
+    }
+    let body = std::fs::read(path)?;
+    std::io::Write::write_all(stream, &body)?;
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn write_json_response(
+    stream: &mut std::net::TcpStream,
+    value: serde_json::Value,
+) -> std::io::Result<()> {
+    let body = serde_json::to_vec(&value).unwrap_or_else(|_| b"{}".to_vec());
+    write_response(stream, StatusCode::OK, "application/json", &body)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn write_json_error(
+    stream: &mut std::net::TcpStream,
+    status: StatusCode,
+    detail: &str,
+) -> std::io::Result<()> {
+    let body = serde_json::to_vec(&serde_json::json!({ "detail": detail }))
+        .unwrap_or_else(|_| b"{\"detail\":\"error\"}".to_vec());
+    write_response(stream, status, "application/json", &body)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn write_text_response(
+    stream: &mut std::net::TcpStream,
+    status: StatusCode,
+    text: &str,
+) -> std::io::Result<()> {
+    write_response(stream, status, "text/plain; charset=utf-8", text.as_bytes())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn write_empty_response(
+    stream: &mut std::net::TcpStream,
+    status: StatusCode,
+) -> std::io::Result<()> {
+    write_response(stream, status, "text/plain", b"")
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn write_response(
+    stream: &mut std::net::TcpStream,
+    status: StatusCode,
+    content_type: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
+    let headers = vec![
+        ("Content-Type".to_string(), content_type.to_string()),
+        ("Content-Length".to_string(), body.len().to_string()),
+        ("Connection".to_string(), "close".to_string()),
+    ];
+    write_response_head(stream, status, &headers)?;
+    std::io::Write::write_all(stream, body)?;
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn write_response_head(
+    stream: &mut std::net::TcpStream,
+    status: StatusCode,
+    headers: &[(String, String)],
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    write!(
+        stream,
+        "HTTP/1.1 {} {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, HEAD, POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\n",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or("OK")
+    )?;
+    for (name, value) in headers {
+        write!(stream, "{name}: {value}\r\n")?;
+    }
+    write!(stream, "\r\n")?;
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn health_json(state: &AppState) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "mode": "path-stream",
+        "runtime": "rust",
+        "sendfileEnabled": state.sendfile_enabled,
+        "dataDir": state.data_dir.to_string_lossy(),
+        "initialChunkBytes": state.initial_chunk_bytes,
+        "readChunkBytes": state.read_chunk_bytes,
+        "prefetchBytes": state.prefetch_bytes,
+        "prefetchMaxTasks": state.prefetch_max_tasks,
+    })
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn config_json(state: &AppState) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "0.3.0",
+        "mode": "path-stream",
+        "runtime": "rust",
+        "sendfileSupported": sendfile_supported(),
+        "sendfileEnabled": state.sendfile_enabled,
+        "initialChunkBytes": state.initial_chunk_bytes,
+        "readChunkBytes": state.read_chunk_bytes,
+        "prefetchBytes": state.prefetch_bytes,
+        "prefetchMaxTasks": state.prefetch_max_tasks,
+        "mediaExtensions": MEDIA_EXTENSIONS,
+        "audioExtensions": ["aac", "flac", "m4a", "mp3", "ogg", "opus", "wav", "webm"],
+        "videoExtensions": ["m4v", "mkv", "mov", "mp4", "webm"],
+        "endpoints": {
+            "stream": "/api/stream/{base64urlPath}",
+            "meta": "/api/meta/{base64urlPath}",
+            "stats": "/api/stats",
+            "resetStats": "/api/stats/reset",
+            "upload": "/api/upload",
+            "demoFiles": "/api/files"
+        }
+    })
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn list_demo_uploads_sync(upload_dir: &Path) -> Vec<MediaMeta> {
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(upload_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && is_media_name(&path) {
+                if let Ok(meta) = file_meta_sync(path) {
+                    files.push(meta);
+                }
+            }
+        }
+    }
+    files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    files
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn ensure_streamable_path_sync(encoded_path: &str) -> Result<PathBuf, AppError> {
+    let path = decode_path(encoded_path)?;
+    if !is_media_name(&path) {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "unsupported media extension",
+        ));
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| AppError::new(StatusCode::NOT_FOUND, "media file not found"))?;
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|_| AppError::new(StatusCode::NOT_FOUND, "media file not found"))?;
+    if !metadata.is_file() {
+        return Err(AppError::new(StatusCode::NOT_FOUND, "media file not found"));
+    }
+    Ok(canonical)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn file_meta_sync(path: PathBuf) -> Result<MediaMeta, AppError> {
+    let metadata = std::fs::metadata(&path)
+        .map_err(|_| AppError::new(StatusCode::NOT_FOUND, "media file not found"))?;
+    let mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let path_string = path.to_string_lossy().to_string();
+    let id = encode_path(&path_string);
+    Ok(MediaMeta {
+        id: id.clone(),
+        path: path_string,
+        name: path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("media")
+            .to_string(),
+        content_type: mime_guess::from_path(&path)
+            .first_or_octet_stream()
+            .to_string(),
+        size: metadata.len(),
+        mtime,
+        stream_url: format!("/api/stream/{id}"),
+    })
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn unique_upload_path_sync(upload_dir: &Path, filename: &str) -> std::io::Result<PathBuf> {
+    let stem = Path::new(filename)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("media");
+    let suffix = Path::new(filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    let mut candidate = upload_dir.join(format!("{stem}{suffix}"));
+    let mut index = 2;
+    while candidate.exists() {
+        candidate = upload_dir.join(format!("{stem}-{index}{suffix}"));
+        index += 1;
+    }
+    Ok(candidate)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }

@@ -53,6 +53,9 @@ Useful runtime tuning variables:
   Defaults to `0`, which disables prefetch.
 - `AUDIO_WIDGET_PREFETCH_MAX_TASKS`: max concurrent background prefetch tasks.
   Defaults to `2`.
+- `AUDIO_WIDGET_SENDFILE_ENABLED`: Linux x86_64 plain-HTTP mode that serves
+  `/api/stream/*` with `sendfile(2)`. Defaults to `false`; enable it only when
+  the container is terminating HTTP directly, not TLS.
 
 The GitHub workflow publishes:
 

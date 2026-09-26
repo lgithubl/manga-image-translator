@@ -83,6 +83,34 @@ jobs:
           curl -fsS -H "Range: bytes=0-31" "http://127.0.0.1:8080/api/stream/$FILE_ID" >/tmp/smoke-range.bin
           test "$(wc -c </tmp/smoke-range.bin)" -eq 32
 
+      - name: Smoke sendfile mode
+        shell: bash
+        run: |
+          docker rm -f audio-widget >/dev/null 2>&1 || true
+          docker run -d --name audio-widget \
+            -p 8080:8080 \
+            -e AUDIO_WIDGET_SENDFILE_ENABLED=true \
+            -v "$RUNNER_TEMP/audio-widget-data:/data" \
+            "${{ inputs.image }}"
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/health | grep -q '"sendfileEnabled":true'; then
+              break
+            fi
+            docker logs --tail 80 audio-widget || true
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8080/api/upload \
+            -F "file=@/tmp/smoke.wav;type=audio/wav" \
+            | tee "$RUNNER_TEMP/audio-widget-sendfile-upload.json"
+          FILE_ID="$(python - <<'PY'
+          import json
+          print(json.load(open("${{ runner.temp }}/audio-widget-sendfile-upload.json"))["id"])
+          PY
+          )"
+          curl -fsS -H "Range: bytes=0-31" "http://127.0.0.1:8080/api/stream/$FILE_ID" >/tmp/smoke-sendfile-range.bin
+          test "$(wc -c </tmp/smoke-sendfile-range.bin)" -eq 32
+          curl -fsS http://127.0.0.1:8080/api/stats | grep -q '"sendfileRequests":1'
+
       - name: Start authenticated proxy
         id: auth
         shell: bash
