@@ -283,7 +283,7 @@ async fn main() -> Result<()> {
         MIN_INITIAL_CHUNK_BYTES,
         read_chunk_bytes,
     );
-    let sendfile_enabled = sendfile_supported() && env_bool("AUDIO_WIDGET_SENDFILE_ENABLED", false);
+    let sendfile_enabled = sendfile_supported() && env_bool("AUDIO_WIDGET_SENDFILE_ENABLED", true);
     let tcp_nodelay = env_bool("AUDIO_WIDGET_TCP_NODELAY", true);
     let socket_send_buffer_bytes = env_u32(
         "AUDIO_WIDGET_SOCKET_SEND_BUFFER_BYTES",
@@ -317,7 +317,12 @@ async fn main() -> Result<()> {
         stream_cache_control: Arc::new(stream_cache_control),
         initial_chunk_bytes,
         read_chunk_bytes,
-        prefetch_bytes: env_u64("AUDIO_WIDGET_PREFETCH_BYTES", 0, 0, MAX_PREFETCH_BYTES),
+        prefetch_bytes: env_u64(
+            "AUDIO_WIDGET_PREFETCH_BYTES",
+            8 * 1024 * 1024,
+            0,
+            MAX_PREFETCH_BYTES,
+        ),
         prefetch_max_tasks,
         prefetch_semaphore: Arc::new(Semaphore::new(prefetch_max_tasks)),
         prefetch_paths: Arc::new(Mutex::new(HashSet::new())),

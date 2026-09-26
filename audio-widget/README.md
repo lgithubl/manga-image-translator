@@ -55,18 +55,18 @@ Useful runtime tuning variables:
 - `AUDIO_WIDGET_READ_CHUNK_BYTES`: later stream chunk size. Defaults to
   `1048576` bytes and is clamped between 64KB and 16MB.
 - `AUDIO_WIDGET_PREFETCH_BYTES`: bytes to read ahead after the requested range.
-  Defaults to `0`, which disables prefetch.
+  Defaults to `8388608` bytes. Set to `0` to disable prefetch.
 - `AUDIO_WIDGET_PREFETCH_MAX_TASKS`: max concurrent background prefetch tasks.
   Defaults to `2`.
 - `AUDIO_WIDGET_SENDFILE_ENABLED`: Linux x86_64 plain-HTTP mode that serves
-  `/api/stream/*` with `sendfile(2)`. Defaults to `false`; enable it only when
-  the container is terminating HTTP directly, not TLS.
+  `/api/stream/*` with `sendfile(2)`. Defaults to `true` on supported Linux
+  x86_64 HTTP deployments. Set to `false` to fall back to userspace streaming.
 - `AUDIO_WIDGET_UPLOAD_ENABLED`: enables the demo upload endpoint. Defaults to
   `false`; keep it disabled for production media directories.
 - `AUDIO_WIDGET_UPLOAD_DIR`: writable directory for demo uploads when uploads
   are enabled. Defaults to `/tmp/audio-widget/uploads` in the image.
 - `AUDIO_WIDGET_TCP_NODELAY`: toggles `TCP_NODELAY` for the Linux sendfile
-  server. Defaults to `true`.
+  server. Defaults to `true`; set to `false` to let the OS coalesce writes.
 - `AUDIO_WIDGET_SOCKET_SEND_BUFFER_BYTES`: optional `SO_SNDBUF` size for the
   Linux sendfile server. Defaults to `0`, which leaves the OS default.
 - `AUDIO_WIDGET_STREAM_CACHE_CONTROL`: `Cache-Control` header for media streams.
