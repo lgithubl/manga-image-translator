@@ -39,6 +39,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/audio-widget-data"
           docker run -d --name audio-widget \
             -p 8080:8080 \
+            -e AUDIO_WIDGET_UPLOAD_ENABLED=true \
+            -e AUDIO_WIDGET_UPLOAD_DIR=/data/uploads \
             -v "$RUNNER_TEMP/audio-widget-data:/data" \
             "${{ inputs.image }}"
 
@@ -90,6 +92,8 @@ jobs:
           docker run -d --name audio-widget \
             -p 8080:8080 \
             -e AUDIO_WIDGET_SENDFILE_ENABLED=true \
+            -e AUDIO_WIDGET_UPLOAD_ENABLED=true \
+            -e AUDIO_WIDGET_UPLOAD_DIR=/data/uploads \
             -v "$RUNNER_TEMP/audio-widget-data:/data" \
             "${{ inputs.image }}"
           for i in $(seq 1 60); do

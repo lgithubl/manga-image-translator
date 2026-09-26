@@ -40,8 +40,13 @@ If the upper layer already encoded the path, pass it as `id` instead of `path`.
 ## Docker
 
 ```bash
-docker run --rm -p 8080:8080 -v "$PWD/audio-data:/data" audio-widget
+docker run --rm -p 8080:8080 -v "$PWD/audio-data:/media:ro" audio-widget
 ```
+
+Production media directories are read-only inputs. Mount the directory that
+contains real audio/video files as read-only and pass those absolute paths from
+the upper layer; this service must not create, rename, delete, or write files in
+that media directory.
 
 Useful runtime tuning variables:
 
@@ -56,6 +61,10 @@ Useful runtime tuning variables:
 - `AUDIO_WIDGET_SENDFILE_ENABLED`: Linux x86_64 plain-HTTP mode that serves
   `/api/stream/*` with `sendfile(2)`. Defaults to `false`; enable it only when
   the container is terminating HTTP directly, not TLS.
+- `AUDIO_WIDGET_UPLOAD_ENABLED`: enables the demo upload endpoint. Defaults to
+  `false`; keep it disabled for production media directories.
+- `AUDIO_WIDGET_UPLOAD_DIR`: writable directory for demo uploads when uploads
+  are enabled. Defaults to `/tmp/audio-widget/uploads` in the image.
 
 The GitHub workflow publishes:
 
@@ -86,8 +95,9 @@ disk reads, network transfer, client cancellation, or prefetch pressure.
 Supported media extensions include `mp3`, `wav`, `flac`, `m4a`, `aac`, `ogg`,
 `opus`, `webm`, `mp4`, `m4v`, `mov`, and `mkv`.
 
-Demo uploads are still available and are stored under `/data/uploads`, but they
-are not the production data model.
+Demo uploads are disabled by default. If enabled, they must use
+`AUDIO_WIDGET_UPLOAD_DIR`; they are not the production data model and should not
+point at the real media directory.
 
 For faster first playback, keep `AUDIO_WIDGET_INITIAL_CHUNK_BYTES` modest,
 enable a small prefetch window such as 8MB or 16MB for slow NAS disks, and make

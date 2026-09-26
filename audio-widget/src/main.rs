@@ -47,6 +47,7 @@ struct AppState {
     upload_dir: Arc<PathBuf>,
     stats: Arc<Stats>,
     sendfile_enabled: bool,
+    upload_enabled: bool,
     initial_chunk_bytes: usize,
     read_chunk_bytes: usize,
     prefetch_bytes: u64,
@@ -262,8 +263,11 @@ async fn main() -> Result<()> {
     let public_dir = root.join("public");
     let data_dir = env::var("AUDIO_WIDGET_DATA_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| root.join("data"));
-    let upload_dir = data_dir.join("uploads");
+        .unwrap_or_else(|_| PathBuf::from("/tmp/audio-widget"));
+    let upload_dir = env::var("AUDIO_WIDGET_UPLOAD_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| data_dir.join("uploads"));
+    let upload_enabled = env_bool("AUDIO_WIDGET_UPLOAD_ENABLED", false);
     let read_chunk_bytes = env_usize(
         "AUDIO_WIDGET_READ_CHUNK_BYTES",
         DEFAULT_READ_CHUNK_BYTES,
@@ -284,15 +288,18 @@ async fn main() -> Result<()> {
         64,
     );
 
-    fs::create_dir_all(&upload_dir)
-        .await
-        .context("create upload dir")?;
+    if upload_enabled {
+        fs::create_dir_all(&upload_dir)
+            .await
+            .context("create upload dir")?;
+    }
 
     let state = AppState {
         data_dir: Arc::new(data_dir),
         upload_dir: Arc::new(upload_dir),
         stats: Arc::new(Stats::new()),
         sendfile_enabled,
+        upload_enabled,
         initial_chunk_bytes,
         read_chunk_bytes,
         prefetch_bytes: env_u64("AUDIO_WIDGET_PREFETCH_BYTES", 0, 0, MAX_PREFETCH_BYTES),
@@ -365,6 +372,8 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "runtime": "rust",
         "sendfileEnabled": state.sendfile_enabled,
         "dataDir": state.data_dir.to_string_lossy(),
+        "uploadEnabled": state.upload_enabled,
+        "uploadDir": state.upload_dir.to_string_lossy(),
         "initialChunkBytes": state.initial_chunk_bytes,
         "readChunkBytes": state.read_chunk_bytes,
         "prefetchBytes": state.prefetch_bytes,
@@ -379,6 +388,8 @@ async fn config(State(state): State<AppState>) -> Json<serde_json::Value> {
         "runtime": "rust",
         "sendfileSupported": sendfile_supported(),
         "sendfileEnabled": state.sendfile_enabled,
+        "uploadEnabled": state.upload_enabled,
+        "uploadDir": state.upload_dir.to_string_lossy(),
         "initialChunkBytes": state.initial_chunk_bytes,
         "readChunkBytes": state.read_chunk_bytes,
         "prefetchBytes": state.prefetch_bytes,
@@ -418,6 +429,9 @@ async fn list_files(State(state): State<AppState>) -> Result<Json<serde_json::Va
         .stats
         .file_list_requests
         .fetch_add(1, Ordering::Relaxed);
+    if !state.upload_enabled {
+        return Ok(Json(serde_json::json!({ "files": [] })));
+    }
     let mut files = Vec::new();
     let mut entries = fs::read_dir(&*state.upload_dir)
         .await
@@ -452,6 +466,12 @@ async fn upload_file(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<Json<MediaMeta>, AppError> {
+    if !state.upload_enabled {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "demo upload is disabled",
+        ));
+    }
     state.stats.upload_requests.fetch_add(1, Ordering::Relaxed);
     while let Some(field) = multipart
         .next_field()
@@ -882,6 +902,8 @@ fn stats_snapshot(state: &AppState) -> serde_json::Value {
         "config": {
             "sendfileSupported": sendfile_supported(),
             "sendfileEnabled": state.sendfile_enabled,
+            "uploadEnabled": state.upload_enabled,
+            "uploadDir": state.upload_dir.to_string_lossy(),
             "initialChunkBytes": state.initial_chunk_bytes,
             "readChunkBytes": state.read_chunk_bytes,
             "prefetchBytes": state.prefetch_bytes,
@@ -1250,6 +1272,9 @@ fn handle_sendfile_connection(
                 .stats
                 .file_list_requests
                 .fetch_add(1, Ordering::Relaxed);
+            if !state.upload_enabled {
+                return write_json_response(&mut stream, serde_json::json!({ "files": [] }));
+            }
             write_json_response(
                 &mut stream,
                 serde_json::json!({ "files": list_demo_uploads_sync(&state.upload_dir) }),
@@ -1569,6 +1594,9 @@ fn handle_sendfile_upload(
     request: &SimpleRequest,
 ) -> std::io::Result<()> {
     state.stats.upload_requests.fetch_add(1, Ordering::Relaxed);
+    if !state.upload_enabled {
+        return write_json_error(stream, StatusCode::FORBIDDEN, "demo upload is disabled");
+    }
     let content_type = request
         .headers
         .get("content-type")
@@ -1745,6 +1773,8 @@ fn health_json(state: &AppState) -> serde_json::Value {
         "runtime": "rust",
         "sendfileEnabled": state.sendfile_enabled,
         "dataDir": state.data_dir.to_string_lossy(),
+        "uploadEnabled": state.upload_enabled,
+        "uploadDir": state.upload_dir.to_string_lossy(),
         "initialChunkBytes": state.initial_chunk_bytes,
         "readChunkBytes": state.read_chunk_bytes,
         "prefetchBytes": state.prefetch_bytes,
@@ -1760,6 +1790,8 @@ fn config_json(state: &AppState) -> serde_json::Value {
         "runtime": "rust",
         "sendfileSupported": sendfile_supported(),
         "sendfileEnabled": state.sendfile_enabled,
+        "uploadEnabled": state.upload_enabled,
+        "uploadDir": state.upload_dir.to_string_lossy(),
         "initialChunkBytes": state.initial_chunk_bytes,
         "readChunkBytes": state.read_chunk_bytes,
         "prefetchBytes": state.prefetch_bytes,
