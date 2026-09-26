@@ -3,7 +3,7 @@ use std::env;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -38,6 +38,8 @@ const MIN_READ_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_READ_CHUNK_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_PREFETCH_MAX_TASKS: usize = 2;
 const MAX_PREFETCH_BYTES: u64 = 512 * 1024 * 1024;
+const SLOW_FIRST_CHUNK_US: u64 = 500_000;
+const SLOW_STREAM_US: u64 = 5_000_000;
 
 #[derive(Clone)]
 struct AppState {
@@ -56,17 +58,35 @@ struct AppState {
 struct Stats {
     started_at_unix: AtomicU64,
     stream_requests: AtomicU64,
+    stream_active: AtomicU64,
+    stream_active_max: AtomicU64,
     stream_head_requests: AtomicU64,
     stream_range_requests: AtomicU64,
     stream_full_requests: AtomicU64,
+    stream_status_200: AtomicU64,
+    stream_status_206: AtomicU64,
+    stream_status_4xx: AtomicU64,
+    stream_status_5xx: AtomicU64,
+    stream_requested_bytes: AtomicU64,
     stream_errors: AtomicU64,
+    stream_canceled: AtomicU64,
     stream_completed: AtomicU64,
     stream_bytes: AtomicU64,
     stream_chunks: AtomicU64,
+    stream_read_us_total: AtomicU64,
+    stream_duration_us_total: AtomicU64,
     stream_first_chunk_us_total: AtomicU64,
     stream_open_us_total: AtomicU64,
     stream_seek_us_total: AtomicU64,
     stream_setup_us_total: AtomicU64,
+    stream_first_chunk_us_max: AtomicU64,
+    stream_read_us_max: AtomicU64,
+    stream_duration_us_max: AtomicU64,
+    stream_open_us_max: AtomicU64,
+    stream_seek_us_max: AtomicU64,
+    stream_setup_us_max: AtomicU64,
+    stream_slow_first_chunk: AtomicU64,
+    stream_slow_completed: AtomicU64,
     upload_requests: AtomicU64,
     upload_bytes: AtomicU64,
     meta_requests: AtomicU64,
@@ -93,17 +113,35 @@ impl Stats {
     fn reset(&self) {
         self.started_at_unix.store(now_unix(), Ordering::Relaxed);
         self.stream_requests.store(0, Ordering::Relaxed);
+        self.stream_active.store(0, Ordering::Relaxed);
+        self.stream_active_max.store(0, Ordering::Relaxed);
         self.stream_head_requests.store(0, Ordering::Relaxed);
         self.stream_range_requests.store(0, Ordering::Relaxed);
         self.stream_full_requests.store(0, Ordering::Relaxed);
+        self.stream_status_200.store(0, Ordering::Relaxed);
+        self.stream_status_206.store(0, Ordering::Relaxed);
+        self.stream_status_4xx.store(0, Ordering::Relaxed);
+        self.stream_status_5xx.store(0, Ordering::Relaxed);
+        self.stream_requested_bytes.store(0, Ordering::Relaxed);
         self.stream_errors.store(0, Ordering::Relaxed);
+        self.stream_canceled.store(0, Ordering::Relaxed);
         self.stream_completed.store(0, Ordering::Relaxed);
         self.stream_bytes.store(0, Ordering::Relaxed);
         self.stream_chunks.store(0, Ordering::Relaxed);
+        self.stream_read_us_total.store(0, Ordering::Relaxed);
+        self.stream_duration_us_total.store(0, Ordering::Relaxed);
         self.stream_first_chunk_us_total.store(0, Ordering::Relaxed);
         self.stream_open_us_total.store(0, Ordering::Relaxed);
         self.stream_seek_us_total.store(0, Ordering::Relaxed);
         self.stream_setup_us_total.store(0, Ordering::Relaxed);
+        self.stream_first_chunk_us_max.store(0, Ordering::Relaxed);
+        self.stream_read_us_max.store(0, Ordering::Relaxed);
+        self.stream_duration_us_max.store(0, Ordering::Relaxed);
+        self.stream_open_us_max.store(0, Ordering::Relaxed);
+        self.stream_seek_us_max.store(0, Ordering::Relaxed);
+        self.stream_setup_us_max.store(0, Ordering::Relaxed);
+        self.stream_slow_first_chunk.store(0, Ordering::Relaxed);
+        self.stream_slow_completed.store(0, Ordering::Relaxed);
         self.upload_requests.store(0, Ordering::Relaxed);
         self.upload_bytes.store(0, Ordering::Relaxed);
         self.meta_requests.store(0, Ordering::Relaxed);
@@ -118,6 +156,41 @@ impl Stats {
         self.prefetch_errors.store(0, Ordering::Relaxed);
         self.prefetch_bytes.store(0, Ordering::Relaxed);
         self.prefetch_read_us_total.store(0, Ordering::Relaxed);
+    }
+}
+
+struct StreamGuard {
+    stats: Arc<Stats>,
+    request_started: Instant,
+    done: AtomicBool,
+}
+
+impl StreamGuard {
+    fn new(stats: Arc<Stats>, request_started: Instant) -> Self {
+        Self {
+            stats,
+            request_started,
+            done: AtomicBool::new(false),
+        }
+    }
+
+    fn finish(&self) {
+        if self
+            .done
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            complete_stream(&self.stats, self.request_started);
+        }
+    }
+}
+
+impl Drop for StreamGuard {
+    fn drop(&mut self) {
+        if !self.done.load(Ordering::Relaxed) {
+            self.stats.stream_canceled.fetch_add(1, Ordering::Relaxed);
+            self.stats.stream_active.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -410,6 +483,8 @@ async fn stream_path(
 ) -> Result<Response, AppError> {
     let request_started = Instant::now();
     state.stats.stream_requests.fetch_add(1, Ordering::Relaxed);
+    let active = state.stats.stream_active.fetch_add(1, Ordering::Relaxed) + 1;
+    atomic_max(&state.stats.stream_active_max, active);
     if method == Method::HEAD {
         state
             .stats
@@ -419,14 +494,18 @@ async fn stream_path(
     let path = match ensure_streamable_path(&encoded_path).await {
         Ok(path) => path,
         Err(error) => {
+            record_stream_status(&state.stats, error.status);
             state.stats.stream_errors.fetch_add(1, Ordering::Relaxed);
+            state.stats.stream_active.fetch_sub(1, Ordering::Relaxed);
             return Err(error);
         }
     };
     let metadata = match fs::metadata(&path).await {
         Ok(metadata) => metadata,
         Err(_) => {
+            record_stream_status(&state.stats, StatusCode::NOT_FOUND);
             state.stats.stream_errors.fetch_add(1, Ordering::Relaxed);
+            state.stats.stream_active.fetch_sub(1, Ordering::Relaxed);
             return Err(AppError::new(StatusCode::NOT_FOUND, "media file not found"));
         }
     };
@@ -446,13 +525,19 @@ async fn stream_path(
     let (status, start, end) = match parse_range(range_header, total) {
         Ok(range) => range,
         Err(error) => {
+            record_stream_status(&state.stats, error.status);
             state.stats.stream_errors.fetch_add(1, Ordering::Relaxed);
+            state.stats.stream_active.fetch_sub(1, Ordering::Relaxed);
             return Err(error);
         }
     };
     let length = end
         .saturating_sub(start)
         .saturating_add(if total == 0 { 0 } else { 1 });
+    state
+        .stats
+        .stream_requested_bytes
+        .fetch_add(length, Ordering::Relaxed);
     let content_type = mime_guess::from_path(&path)
         .first_or_octet_stream()
         .to_string();
@@ -474,11 +559,14 @@ async fn stream_path(
     }
 
     if method == Method::HEAD || length == 0 {
+        let setup_us = elapsed_us(request_started);
         state
             .stats
             .stream_setup_us_total
-            .fetch_add(elapsed_us(request_started), Ordering::Relaxed);
-        state.stats.stream_completed.fetch_add(1, Ordering::Relaxed);
+            .fetch_add(setup_us, Ordering::Relaxed);
+        atomic_max(&state.stats.stream_setup_us_max, setup_us);
+        record_stream_status(&state.stats, status);
+        complete_stream(&state.stats, request_started);
         return Ok((status, response_headers, Body::empty()).into_response());
     }
 
@@ -486,38 +574,49 @@ async fn stream_path(
     let mut file = match File::open(&path).await {
         Ok(file) => file,
         Err(_) => {
+            record_stream_status(&state.stats, StatusCode::NOT_FOUND);
             state.stats.stream_errors.fetch_add(1, Ordering::Relaxed);
+            state.stats.stream_active.fetch_sub(1, Ordering::Relaxed);
             return Err(AppError::new(StatusCode::NOT_FOUND, "media file not found"));
         }
     };
+    let open_us = elapsed_us(open_started);
     state
         .stats
         .stream_open_us_total
-        .fetch_add(elapsed_us(open_started), Ordering::Relaxed);
+        .fetch_add(open_us, Ordering::Relaxed);
+    atomic_max(&state.stats.stream_open_us_max, open_us);
     let seek_started = Instant::now();
     if file.seek(SeekFrom::Start(start)).await.is_err() {
+        record_stream_status(&state.stats, StatusCode::INTERNAL_SERVER_ERROR);
         state.stats.stream_errors.fetch_add(1, Ordering::Relaxed);
+        state.stats.stream_active.fetch_sub(1, Ordering::Relaxed);
         return Err(AppError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to seek media file",
         ));
     }
+    let seek_us = elapsed_us(seek_started);
     state
         .stats
         .stream_seek_us_total
-        .fetch_add(elapsed_us(seek_started), Ordering::Relaxed);
+        .fetch_add(seek_us, Ordering::Relaxed);
+    atomic_max(&state.stats.stream_seek_us_max, seek_us);
     spawn_prefetch(state.clone(), path.clone(), end.saturating_add(1), total).await;
+    let setup_us = elapsed_us(request_started);
     state
         .stats
         .stream_setup_us_total
-        .fetch_add(elapsed_us(request_started), Ordering::Relaxed);
+        .fetch_add(setup_us, Ordering::Relaxed);
+    atomic_max(&state.stats.stream_setup_us_max, setup_us);
+    record_stream_status(&state.stats, status);
+    let stream_guard = Arc::new(StreamGuard::new(state.stats.clone(), request_started));
     let stream = stream_file_range(
         file,
         length,
         state.initial_chunk_bytes,
         state.read_chunk_bytes,
-        state.stats.clone(),
-        request_started,
+        stream_guard,
     );
     Ok((status, response_headers, Body::from_stream(stream)).into_response())
 }
@@ -527,8 +626,7 @@ fn stream_file_range(
     length: u64,
     initial_chunk_size: usize,
     chunk_size: usize,
-    stats: Arc<Stats>,
-    request_started: Instant,
+    guard: Arc<StreamGuard>,
 ) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> {
     stream::try_unfold(
         (
@@ -537,18 +635,10 @@ fn stream_file_range(
             initial_chunk_size.max(1),
             chunk_size.max(1),
             true,
-            stats,
-            request_started,
+            guard,
         ),
-        |(
-            mut file,
-            remaining,
-            initial_chunk_size,
-            chunk_size,
-            is_first,
-            stats,
-            request_started,
-        )| async move {
+        |(mut file, remaining, initial_chunk_size, chunk_size, is_first, guard)| async move {
+            let stats = guard.stats.clone();
             if remaining == 0 {
                 return Ok(None);
             }
@@ -559,21 +649,36 @@ fn stream_file_range(
             };
             let read_len = (current_chunk_size as u64).min(remaining) as usize;
             let mut buffer = vec![0; read_len];
+            let read_started = Instant::now();
             let bytes_read = match file.read(&mut buffer).await {
                 Ok(bytes_read) => bytes_read,
                 Err(error) => {
                     stats.stream_errors.fetch_add(1, Ordering::Relaxed);
+                    stats.stream_active.fetch_sub(1, Ordering::Relaxed);
+                    guard.done.store(true, Ordering::Relaxed);
                     return Err(error);
                 }
             };
+            let read_us = elapsed_us(read_started);
+            stats
+                .stream_read_us_total
+                .fetch_add(read_us, Ordering::Relaxed);
+            atomic_max(&stats.stream_read_us_max, read_us);
             if bytes_read == 0 {
-                stats.stream_completed.fetch_add(1, Ordering::Relaxed);
+                guard.finish();
                 return Ok(None);
             }
             if is_first {
+                let first_chunk_us = elapsed_us(guard.request_started);
                 stats
                     .stream_first_chunk_us_total
-                    .fetch_add(elapsed_us(request_started), Ordering::Relaxed);
+                    .fetch_add(first_chunk_us, Ordering::Relaxed);
+                atomic_max(&stats.stream_first_chunk_us_max, first_chunk_us);
+                if first_chunk_us >= SLOW_FIRST_CHUNK_US {
+                    stats
+                        .stream_slow_first_chunk
+                        .fetch_add(1, Ordering::Relaxed);
+                }
             }
             stats
                 .stream_bytes
@@ -582,7 +687,7 @@ fn stream_file_range(
             buffer.truncate(bytes_read);
             let next_remaining = remaining.saturating_sub(bytes_read as u64);
             if next_remaining == 0 {
-                stats.stream_completed.fetch_add(1, Ordering::Relaxed);
+                guard.finish();
             }
             Ok(Some((
                 Bytes::from(buffer),
@@ -592,8 +697,7 @@ fn stream_file_range(
                     initial_chunk_size,
                     chunk_size,
                     false,
-                    stats,
-                    request_started,
+                    guard,
                 ),
             )))
         },
@@ -703,12 +807,45 @@ fn header_value(value: &str) -> Result<HeaderValue, AppError> {
         .map_err(|_| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "invalid response header"))
 }
 
+fn record_stream_status(stats: &Stats, status: StatusCode) {
+    match status.as_u16() {
+        200 => {
+            stats.stream_status_200.fetch_add(1, Ordering::Relaxed);
+        }
+        206 => {
+            stats.stream_status_206.fetch_add(1, Ordering::Relaxed);
+        }
+        400..=499 => {
+            stats.stream_status_4xx.fetch_add(1, Ordering::Relaxed);
+        }
+        500..=599 => {
+            stats.stream_status_5xx.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+}
+
+fn complete_stream(stats: &Stats, request_started: Instant) {
+    let duration_us = elapsed_us(request_started);
+    stats.stream_completed.fetch_add(1, Ordering::Relaxed);
+    stats
+        .stream_duration_us_total
+        .fetch_add(duration_us, Ordering::Relaxed);
+    atomic_max(&stats.stream_duration_us_max, duration_us);
+    if duration_us >= SLOW_STREAM_US {
+        stats.stream_slow_completed.fetch_add(1, Ordering::Relaxed);
+    }
+    stats.stream_active.fetch_sub(1, Ordering::Relaxed);
+}
+
 fn stats_snapshot(state: &AppState) -> serde_json::Value {
     let stats = &state.stats;
     let started_at = stats.started_at_unix.load(Ordering::Relaxed);
     let stream_requests = stats.stream_requests.load(Ordering::Relaxed);
     let stream_completed = stats.stream_completed.load(Ordering::Relaxed);
     let stream_chunks = stats.stream_chunks.load(Ordering::Relaxed);
+    let stream_bytes = stats.stream_bytes.load(Ordering::Relaxed);
+    let stream_duration_us = stats.stream_duration_us_total.load(Ordering::Relaxed);
     let prefetch_completed = stats.prefetch_completed.load(Ordering::Relaxed);
     serde_json::json!({
         "startedAtUnix": started_at,
@@ -727,19 +864,38 @@ fn stats_snapshot(state: &AppState) -> serde_json::Value {
         },
         "stream": {
             "requests": stream_requests,
+            "active": stats.stream_active.load(Ordering::Relaxed),
+            "activeMax": stats.stream_active_max.load(Ordering::Relaxed),
             "headRequests": stats.stream_head_requests.load(Ordering::Relaxed),
             "rangeRequests": stats.stream_range_requests.load(Ordering::Relaxed),
             "fullRequests": stats.stream_full_requests.load(Ordering::Relaxed),
+            "status200": stats.stream_status_200.load(Ordering::Relaxed),
+            "status206": stats.stream_status_206.load(Ordering::Relaxed),
+            "status4xx": stats.stream_status_4xx.load(Ordering::Relaxed),
+            "status5xx": stats.stream_status_5xx.load(Ordering::Relaxed),
             "errors": stats.stream_errors.load(Ordering::Relaxed),
+            "canceled": stats.stream_canceled.load(Ordering::Relaxed),
             "completed": stream_completed,
-            "bytes": stats.stream_bytes.load(Ordering::Relaxed),
+            "requestedBytes": stats.stream_requested_bytes.load(Ordering::Relaxed),
+            "bytes": stream_bytes,
             "chunks": stream_chunks,
-            "avgBytesPerRequest": avg_u64(stats.stream_bytes.load(Ordering::Relaxed), stream_completed),
-            "avgBytesPerChunk": avg_u64(stats.stream_bytes.load(Ordering::Relaxed), stream_chunks),
+            "avgBytesPerRequest": avg_u64(stream_bytes, stream_completed),
+            "avgBytesPerChunk": avg_u64(stream_bytes, stream_chunks),
+            "avgThroughputBytesPerSecond": throughput_bps(stream_bytes, stream_duration_us),
             "avgFirstChunkUs": avg_u64(stats.stream_first_chunk_us_total.load(Ordering::Relaxed), stream_chunks.min(stream_requests)),
             "avgOpenUs": avg_u64(stats.stream_open_us_total.load(Ordering::Relaxed), stream_requests),
             "avgSeekUs": avg_u64(stats.stream_seek_us_total.load(Ordering::Relaxed), stream_requests),
             "avgSetupUs": avg_u64(stats.stream_setup_us_total.load(Ordering::Relaxed), stream_requests),
+            "avgReadUs": avg_u64(stats.stream_read_us_total.load(Ordering::Relaxed), stream_chunks),
+            "avgDurationUs": avg_u64(stream_duration_us, stream_completed),
+            "maxFirstChunkUs": stats.stream_first_chunk_us_max.load(Ordering::Relaxed),
+            "maxOpenUs": stats.stream_open_us_max.load(Ordering::Relaxed),
+            "maxSeekUs": stats.stream_seek_us_max.load(Ordering::Relaxed),
+            "maxSetupUs": stats.stream_setup_us_max.load(Ordering::Relaxed),
+            "maxReadUs": stats.stream_read_us_max.load(Ordering::Relaxed),
+            "maxDurationUs": stats.stream_duration_us_max.load(Ordering::Relaxed),
+            "slowFirstChunk": stats.stream_slow_first_chunk.load(Ordering::Relaxed),
+            "slowCompleted": stats.stream_slow_completed.load(Ordering::Relaxed),
         },
         "prefetch": {
             "scheduled": stats.prefetch_scheduled.load(Ordering::Relaxed),
@@ -759,6 +915,24 @@ fn stats_snapshot(state: &AppState) -> serde_json::Value {
 
 fn avg_u64(total: u64, count: u64) -> u64 {
     if count == 0 { 0 } else { total / count }
+}
+
+fn throughput_bps(bytes: u64, duration_us: u64) -> u64 {
+    if duration_us == 0 {
+        0
+    } else {
+        bytes.saturating_mul(1_000_000) / duration_us
+    }
+}
+
+fn atomic_max(target: &AtomicU64, value: u64) {
+    let mut current = target.load(Ordering::Relaxed);
+    while value > current {
+        match target.compare_exchange_weak(current, value, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(previous) => current = previous,
+        }
+    }
 }
 
 fn elapsed_us(started: Instant) -> u64 {
