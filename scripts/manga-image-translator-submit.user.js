@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      1.0.10
+// @version      1.0.11
 // @description  Collect manga images, submit translations, and provide context-menu translation/TTS helpers.
 // @match        *://*/*
 // @run-at       document-start
@@ -541,6 +541,8 @@
         if (action.match === "downloadLinks") return hasDownloadLinkText(text);
         if (action.match === "image") return Boolean(context.imageUrl);
         if (action.match === "text") return Boolean(context.text);
+        if (action.match === "copyable") return Boolean(context.text || context.linkHref);
+        if (action.match === "link") return Boolean(context.linkHref);
         return true;
       })
       .sort((left, right) => right.priority - left.priority || left.label.localeCompare(right.label));
