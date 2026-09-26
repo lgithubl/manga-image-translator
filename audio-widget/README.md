@@ -43,6 +43,17 @@ If the upper layer already encoded the path, pass it as `id` instead of `path`.
 docker run --rm -p 8080:8080 -v "$PWD/audio-data:/data" audio-widget
 ```
 
+Useful runtime tuning variables:
+
+- `AUDIO_WIDGET_INITIAL_CHUNK_BYTES`: first response chunk size. Defaults to
+  `262144` bytes so slow disks can start playback sooner.
+- `AUDIO_WIDGET_READ_CHUNK_BYTES`: later stream chunk size. Defaults to
+  `1048576` bytes and is clamped between 64KB and 16MB.
+- `AUDIO_WIDGET_PREFETCH_BYTES`: bytes to read ahead after the requested range.
+  Defaults to `0`, which disables prefetch.
+- `AUDIO_WIDGET_PREFETCH_MAX_TASKS`: max concurrent background prefetch tasks.
+  Defaults to `2`.
+
 The GitHub workflow publishes:
 
 ```text
@@ -66,3 +77,8 @@ Supported media extensions include `mp3`, `wav`, `flac`, `m4a`, `aac`, `ogg`,
 
 Demo uploads are still available and are stored under `/data/uploads`, but they
 are not the production data model.
+
+For faster first playback, keep `AUDIO_WIDGET_INITIAL_CHUNK_BYTES` modest,
+enable a small prefetch window such as 8MB or 16MB for slow NAS disks, and make
+sure MP4 files are written in faststart form so their metadata is near the front
+of the file.

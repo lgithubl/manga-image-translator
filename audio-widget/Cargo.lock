@@ -21,13 +21,13 @@ dependencies = [
  "anyhow",
  "axum",
  "base64",
+ "bytes",
  "futures-util",
  "http-body-util",
  "mime_guess",
  "serde",
  "serde_json",
  "tokio",
- "tokio-util",
  "tower-http",
 ]
 

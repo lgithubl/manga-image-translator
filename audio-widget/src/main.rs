@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -16,22 +17,36 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use futures_util::TryStreamExt;
+use bytes::Bytes;
+use futures_util::{TryStreamExt, stream};
 use serde::Serialize;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
-use tokio_util::io::ReaderStream;
+use tokio::sync::{Mutex, Semaphore};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
 const MEDIA_EXTENSIONS: &[&str] = &[
     "aac", "flac", "m4a", "mp3", "ogg", "opus", "wav", "webm", "m4v", "mkv", "mov", "mp4",
 ];
+const DEFAULT_INITIAL_CHUNK_BYTES: usize = 256 * 1024;
+const DEFAULT_READ_CHUNK_BYTES: usize = 1024 * 1024;
+const MIN_INITIAL_CHUNK_BYTES: usize = 16 * 1024;
+const MIN_READ_CHUNK_BYTES: usize = 64 * 1024;
+const MAX_READ_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_PREFETCH_MAX_TASKS: usize = 2;
+const MAX_PREFETCH_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Clone)]
 struct AppState {
     data_dir: Arc<PathBuf>,
     upload_dir: Arc<PathBuf>,
+    initial_chunk_bytes: usize,
+    read_chunk_bytes: usize,
+    prefetch_bytes: u64,
+    prefetch_max_tasks: usize,
+    prefetch_semaphore: Arc<Semaphore>,
+    prefetch_paths: Arc<Mutex<HashSet<String>>>,
 }
 
 #[derive(Serialize)]
@@ -91,6 +106,24 @@ async fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| root.join("data"));
     let upload_dir = data_dir.join("uploads");
+    let read_chunk_bytes = env_usize(
+        "AUDIO_WIDGET_READ_CHUNK_BYTES",
+        DEFAULT_READ_CHUNK_BYTES,
+        MIN_READ_CHUNK_BYTES,
+        MAX_READ_CHUNK_BYTES,
+    );
+    let initial_chunk_bytes = env_usize(
+        "AUDIO_WIDGET_INITIAL_CHUNK_BYTES",
+        DEFAULT_INITIAL_CHUNK_BYTES,
+        MIN_INITIAL_CHUNK_BYTES,
+        read_chunk_bytes,
+    );
+    let prefetch_max_tasks = env_usize(
+        "AUDIO_WIDGET_PREFETCH_MAX_TASKS",
+        DEFAULT_PREFETCH_MAX_TASKS,
+        1,
+        64,
+    );
 
     fs::create_dir_all(&upload_dir)
         .await
@@ -99,6 +132,12 @@ async fn main() -> Result<()> {
     let state = AppState {
         data_dir: Arc::new(data_dir),
         upload_dir: Arc::new(upload_dir),
+        initial_chunk_bytes,
+        read_chunk_bytes,
+        prefetch_bytes: env_u64("AUDIO_WIDGET_PREFETCH_BYTES", 0, 0, MAX_PREFETCH_BYTES),
+        prefetch_max_tasks,
+        prefetch_semaphore: Arc::new(Semaphore::new(prefetch_max_tasks)),
+        prefetch_paths: Arc::new(Mutex::new(HashSet::new())),
     };
 
     let app = Router::new()
@@ -155,14 +194,22 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "mode": "path-stream",
         "runtime": "rust",
         "dataDir": state.data_dir.to_string_lossy(),
+        "initialChunkBytes": state.initial_chunk_bytes,
+        "readChunkBytes": state.read_chunk_bytes,
+        "prefetchBytes": state.prefetch_bytes,
+        "prefetchMaxTasks": state.prefetch_max_tasks,
     }))
 }
 
-async fn config() -> Json<serde_json::Value> {
+async fn config(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "apiVersion": "0.3.0",
         "mode": "path-stream",
         "runtime": "rust",
+        "initialChunkBytes": state.initial_chunk_bytes,
+        "readChunkBytes": state.read_chunk_bytes,
+        "prefetchBytes": state.prefetch_bytes,
+        "prefetchMaxTasks": state.prefetch_max_tasks,
         "mediaExtensions": MEDIA_EXTENSIONS,
         "audioExtensions": ["aac", "flac", "m4a", "mp3", "ogg", "opus", "wav", "webm"],
         "videoExtensions": ["m4v", "mkv", "mov", "mp4", "webm"],
@@ -257,6 +304,7 @@ async fn upload_file(
 }
 
 async fn stream_path(
+    State(state): State<AppState>,
     method: Method,
     AxumPath(encoded_path): AxumPath<String>,
     headers: HeaderMap,
@@ -304,13 +352,126 @@ async fn stream_path(
             "failed to seek media file",
         )
     })?;
-    let stream = ReaderStream::new(file.take(length));
+    spawn_prefetch(state.clone(), path.clone(), end.saturating_add(1), total).await;
+    let stream = stream_file_range(
+        file,
+        length,
+        state.initial_chunk_bytes,
+        state.read_chunk_bytes,
+    );
     Ok((status, response_headers, Body::from_stream(stream)).into_response())
+}
+
+fn stream_file_range(
+    file: File,
+    length: u64,
+    initial_chunk_size: usize,
+    chunk_size: usize,
+) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> {
+    stream::try_unfold(
+        (
+            file,
+            length,
+            initial_chunk_size.max(1),
+            chunk_size.max(1),
+            true,
+        ),
+        |(mut file, remaining, initial_chunk_size, chunk_size, is_first)| async move {
+            if remaining == 0 {
+                return Ok(None);
+            }
+            let current_chunk_size = if is_first {
+                initial_chunk_size
+            } else {
+                chunk_size
+            };
+            let read_len = (current_chunk_size as u64).min(remaining) as usize;
+            let mut buffer = vec![0; read_len];
+            let bytes_read = file.read(&mut buffer).await?;
+            if bytes_read == 0 {
+                return Ok(None);
+            }
+            buffer.truncate(bytes_read);
+            let next_remaining = remaining.saturating_sub(bytes_read as u64);
+            Ok(Some((
+                Bytes::from(buffer),
+                (file, next_remaining, initial_chunk_size, chunk_size, false),
+            )))
+        },
+    )
+}
+
+async fn spawn_prefetch(state: AppState, path: PathBuf, start: u64, total: u64) {
+    if state.prefetch_bytes == 0 || start >= total {
+        return;
+    }
+
+    let key = path.to_string_lossy().to_string();
+    {
+        let mut paths = state.prefetch_paths.lock().await;
+        if !paths.insert(key.clone()) {
+            return;
+        }
+    }
+
+    tokio::spawn(async move {
+        let permit = state.prefetch_semaphore.clone().try_acquire_owned();
+        if permit.is_err() {
+            let mut paths = state.prefetch_paths.lock().await;
+            paths.remove(&key);
+            return;
+        }
+        let _permit = permit.ok();
+        let length = state.prefetch_bytes.min(total.saturating_sub(start));
+        let _ = prefetch_range(&path, start, length, state.read_chunk_bytes).await;
+        let mut paths = state.prefetch_paths.lock().await;
+        paths.remove(&key);
+    });
+}
+
+async fn prefetch_range(
+    path: &Path,
+    start: u64,
+    length: u64,
+    chunk_size: usize,
+) -> Result<(), std::io::Error> {
+    if length == 0 {
+        return Ok(());
+    }
+    let mut file = File::open(path).await?;
+    file.seek(SeekFrom::Start(start)).await?;
+    let mut remaining = length;
+    let mut buffer = vec![0; chunk_size.max(1)];
+    while remaining > 0 {
+        let read_len = (buffer.len() as u64).min(remaining) as usize;
+        let bytes_read = file.read(&mut buffer[..read_len]).await?;
+        if bytes_read == 0 {
+            break;
+        }
+        remaining = remaining.saturating_sub(bytes_read as u64);
+    }
+    Ok(())
 }
 
 fn header_value(value: &str) -> Result<HeaderValue, AppError> {
     HeaderValue::from_str(value)
         .map_err(|_| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "invalid response header"))
+}
+
+fn env_usize(name: &str, default: usize, min: usize, max: usize) -> usize {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value.clamp(min, max))
+        .unwrap_or(default)
+}
+
+fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|value| value.clamp(min, max))
+        .unwrap_or(default)
 }
 
 fn safe_name(value: &str) -> String {
