@@ -72,10 +72,15 @@ jobs:
                   sample = int(12000 * math.sin(2 * math.pi * 440 * index / rate))
                   wav.writeframes(struct.pack("<h", sample))
           PY
-          curl -fsS http://127.0.0.1:8080/upload \
+          curl -fsS http://127.0.0.1:8080/api/upload \
             -F "file=@/tmp/smoke.wav;type=audio/wav" \
             | tee "$RUNNER_TEMP/audio-widget-upload.json"
-          curl -fsS -H "Range: bytes=0-31" http://127.0.0.1:8080/files/smoke.wav/stream >/tmp/smoke-range.bin
+          FILE_ID="$(python - <<'PY'
+          import json
+          print(json.load(open("${{ runner.temp }}/audio-widget-upload.json"))["id"])
+          PY
+          )"
+          curl -fsS -H "Range: bytes=0-31" "http://127.0.0.1:8080/api/files/$FILE_ID/stream" >/tmp/smoke-range.bin
           test "$(wc -c </tmp/smoke-range.bin)" -eq 32
 
       - name: Start authenticated proxy

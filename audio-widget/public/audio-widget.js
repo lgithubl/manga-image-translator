@@ -54,7 +54,7 @@
     };
 
     function streamUrl(file) {
-      return joinUrl(config.apiBase, `/files/${encodeURIComponent(file.name)}/stream`);
+      return joinUrl(config.apiBase, `/api/files/${encodeURIComponent(file.id)}/stream`);
     }
 
     function render() {
@@ -128,7 +128,7 @@
       try {
         const form = new FormData();
         form.append("file", file);
-        await requestJson(joinUrl(config.apiBase, "/upload"), {
+        await requestJson(joinUrl(config.apiBase, "/api/upload"), {
           method: "POST",
           body: form,
         });

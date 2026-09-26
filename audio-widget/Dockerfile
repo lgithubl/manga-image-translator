@@ -7,6 +7,10 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+COPY requirements.txt /app/requirements.txt
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r /app/requirements.txt
+
 COPY server.py /app/server.py
 COPY public /app/public
 
@@ -14,4 +18,4 @@ RUN mkdir -p /data/uploads
 
 EXPOSE 8080
 
-CMD ["python", "/app/server.py"]
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080"]
