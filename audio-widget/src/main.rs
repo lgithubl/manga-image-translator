@@ -48,6 +48,9 @@ struct AppState {
     stats: Arc<Stats>,
     sendfile_enabled: bool,
     upload_enabled: bool,
+    tcp_nodelay: bool,
+    socket_send_buffer_bytes: u32,
+    stream_cache_control: Arc<String>,
     initial_chunk_bytes: usize,
     read_chunk_bytes: usize,
     prefetch_bytes: u64,
@@ -281,6 +284,15 @@ async fn main() -> Result<()> {
         read_chunk_bytes,
     );
     let sendfile_enabled = sendfile_supported() && env_bool("AUDIO_WIDGET_SENDFILE_ENABLED", false);
+    let tcp_nodelay = env_bool("AUDIO_WIDGET_TCP_NODELAY", true);
+    let socket_send_buffer_bytes = env_u32(
+        "AUDIO_WIDGET_SOCKET_SEND_BUFFER_BYTES",
+        0,
+        0,
+        64 * 1024 * 1024,
+    );
+    let stream_cache_control =
+        env::var("AUDIO_WIDGET_STREAM_CACHE_CONTROL").unwrap_or_else(|_| "no-store".to_string());
     let prefetch_max_tasks = env_usize(
         "AUDIO_WIDGET_PREFETCH_MAX_TASKS",
         DEFAULT_PREFETCH_MAX_TASKS,
@@ -300,6 +312,9 @@ async fn main() -> Result<()> {
         stats: Arc::new(Stats::new()),
         sendfile_enabled,
         upload_enabled,
+        tcp_nodelay,
+        socket_send_buffer_bytes,
+        stream_cache_control: Arc::new(stream_cache_control),
         initial_chunk_bytes,
         read_chunk_bytes,
         prefetch_bytes: env_u64("AUDIO_WIDGET_PREFETCH_BYTES", 0, 0, MAX_PREFETCH_BYTES),
@@ -374,6 +389,9 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "dataDir": state.data_dir.to_string_lossy(),
         "uploadEnabled": state.upload_enabled,
         "uploadDir": state.upload_dir.to_string_lossy(),
+        "tcpNodelay": state.tcp_nodelay,
+        "socketSendBufferBytes": state.socket_send_buffer_bytes,
+        "streamCacheControl": state.stream_cache_control.as_str(),
         "initialChunkBytes": state.initial_chunk_bytes,
         "readChunkBytes": state.read_chunk_bytes,
         "prefetchBytes": state.prefetch_bytes,
@@ -390,6 +408,9 @@ async fn config(State(state): State<AppState>) -> Json<serde_json::Value> {
         "sendfileEnabled": state.sendfile_enabled,
         "uploadEnabled": state.upload_enabled,
         "uploadDir": state.upload_dir.to_string_lossy(),
+        "tcpNodelay": state.tcp_nodelay,
+        "socketSendBufferBytes": state.socket_send_buffer_bytes,
+        "streamCacheControl": state.stream_cache_control.as_str(),
         "initialChunkBytes": state.initial_chunk_bytes,
         "readChunkBytes": state.read_chunk_bytes,
         "prefetchBytes": state.prefetch_bytes,
@@ -593,7 +614,7 @@ async fn stream_path(
 
     let mut response_headers = HeaderMap::new();
     response_headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response_headers.insert(CACHE_CONTROL, header_value(&state.stream_cache_control)?);
     response_headers.insert(CONTENT_TYPE, header_value(&content_type)?);
     response_headers.insert(CONTENT_LENGTH, header_value(&length.to_string())?);
     response_headers.insert(
@@ -904,6 +925,9 @@ fn stats_snapshot(state: &AppState) -> serde_json::Value {
             "sendfileEnabled": state.sendfile_enabled,
             "uploadEnabled": state.upload_enabled,
             "uploadDir": state.upload_dir.to_string_lossy(),
+            "tcpNodelay": state.tcp_nodelay,
+            "socketSendBufferBytes": state.socket_send_buffer_bytes,
+            "streamCacheControl": state.stream_cache_control.as_str(),
             "initialChunkBytes": state.initial_chunk_bytes,
             "readChunkBytes": state.read_chunk_bytes,
             "prefetchBytes": state.prefetch_bytes,
@@ -1023,6 +1047,14 @@ fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
     env::var(name)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
+        .map(|value| value.clamp(min, max))
+        .unwrap_or(default)
+}
+
+fn env_u32(name: &str, default: u32, min: u32, max: u32) -> u32 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
         .map(|value| value.clamp(min, max))
         .unwrap_or(default)
 }
@@ -1230,6 +1262,10 @@ async fn run_sendfile_http(state: AppState, public_dir: PathBuf, addr: SocketAdd
         tokio::task::spawn_blocking(move || {
             if let Ok(stream) = stream.into_std() {
                 let _ = stream.set_nonblocking(false);
+                let _ = stream.set_nodelay(state.tcp_nodelay);
+                if state.socket_send_buffer_bytes > 0 {
+                    set_socket_send_buffer(&stream, state.socket_send_buffer_bytes);
+                }
                 let _ = handle_sendfile_connection(stream, state, public_dir);
             }
         });
@@ -1472,7 +1508,10 @@ fn handle_sendfile_stream(
         .to_string();
     let mut headers = vec![
         ("Accept-Ranges".to_string(), "bytes".to_string()),
-        ("Cache-Control".to_string(), "no-store".to_string()),
+        (
+            "Cache-Control".to_string(),
+            state.stream_cache_control.to_string(),
+        ),
         ("Content-Type".to_string(), content_type),
         ("Content-Length".to_string(), length.to_string()),
         ("Connection".to_string(), "close".to_string()),
@@ -1515,6 +1554,7 @@ fn handle_sendfile_stream(
         .stream_open_us_total
         .fetch_add(open_us, Ordering::Relaxed);
     atomic_max(&state.stats.stream_open_us_max, open_us);
+    spawn_prefetch_sync(state, path.clone(), end.saturating_add(1), total);
 
     let out_fd = stream.as_raw_fd();
     let in_fd = file.as_raw_fd();
@@ -1522,7 +1562,12 @@ fn handle_sendfile_stream(
     let mut remaining = length;
     let mut first = true;
     while remaining > 0 {
-        let to_send = remaining.min(state.read_chunk_bytes as u64) as usize;
+        let current_chunk = if first {
+            state.initial_chunk_bytes
+        } else {
+            state.read_chunk_bytes
+        };
+        let to_send = remaining.min(current_chunk as u64) as usize;
         let call_started = Instant::now();
         let sent = unsafe { libc::sendfile(out_fd, in_fd, &mut offset, to_send) };
         let call_us = elapsed_us(call_started);
@@ -1585,6 +1630,127 @@ fn encoded_from_stream_path(path: &str) -> Option<&str> {
     }
     path.strip_prefix("/files/")
         .and_then(|rest| rest.strip_suffix("/stream"))
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn spawn_prefetch_sync(state: &AppState, path: PathBuf, start: u64, total: u64) {
+    if state.prefetch_bytes == 0 {
+        state
+            .stats
+            .prefetch_skipped_disabled
+            .fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    if start >= total {
+        state
+            .stats
+            .prefetch_skipped_eof
+            .fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+
+    let key = path.to_string_lossy().to_string();
+    {
+        let mut paths = state.prefetch_paths.blocking_lock();
+        if !paths.insert(key.clone()) {
+            state
+                .stats
+                .prefetch_skipped_duplicate
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
+    state
+        .stats
+        .prefetch_scheduled
+        .fetch_add(1, Ordering::Relaxed);
+
+    let state = state.clone();
+    std::thread::spawn(move || {
+        let permit = match state.prefetch_semaphore.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => {
+                state
+                    .stats
+                    .prefetch_skipped_busy
+                    .fetch_add(1, Ordering::Relaxed);
+                let mut paths = state.prefetch_paths.blocking_lock();
+                paths.remove(&key);
+                return;
+            }
+        };
+        state.stats.prefetch_active.fetch_add(1, Ordering::Relaxed);
+        let length = state.prefetch_bytes.min(total.saturating_sub(start));
+        let prefetch_started = Instant::now();
+        match prefetch_range_sync(&path, start, length, state.read_chunk_bytes) {
+            Ok(bytes_read) => {
+                state
+                    .stats
+                    .prefetch_completed
+                    .fetch_add(1, Ordering::Relaxed);
+                state
+                    .stats
+                    .prefetch_bytes
+                    .fetch_add(bytes_read, Ordering::Relaxed);
+                state
+                    .stats
+                    .prefetch_read_us_total
+                    .fetch_add(elapsed_us(prefetch_started), Ordering::Relaxed);
+            }
+            Err(_) => {
+                state.stats.prefetch_errors.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        drop(permit);
+        state.stats.prefetch_active.fetch_sub(1, Ordering::Relaxed);
+        let mut paths = state.prefetch_paths.blocking_lock();
+        paths.remove(&key);
+    });
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn prefetch_range_sync(
+    path: &Path,
+    start: u64,
+    length: u64,
+    chunk_size: usize,
+) -> std::io::Result<u64> {
+    use std::io::{Read, Seek};
+
+    if length == 0 {
+        return Ok(0);
+    }
+    let mut file = std::fs::File::open(path)?;
+    file.seek(std::io::SeekFrom::Start(start))?;
+    let mut remaining = length;
+    let mut total_read = 0;
+    let mut buffer = vec![0; chunk_size.max(1)];
+    while remaining > 0 {
+        let read_len = (buffer.len() as u64).min(remaining) as usize;
+        let bytes_read = file.read(&mut buffer[..read_len])?;
+        if bytes_read == 0 {
+            break;
+        }
+        total_read += bytes_read as u64;
+        remaining = remaining.saturating_sub(bytes_read as u64);
+    }
+    Ok(total_read)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn set_socket_send_buffer(stream: &std::net::TcpStream, bytes: u32) {
+    use std::os::fd::AsRawFd;
+
+    let value = bytes as libc::c_int;
+    unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            (&value as *const libc::c_int).cast(),
+            std::mem::size_of_val(&value) as libc::socklen_t,
+        );
+    }
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

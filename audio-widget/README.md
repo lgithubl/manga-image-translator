@@ -65,6 +65,12 @@ Useful runtime tuning variables:
   `false`; keep it disabled for production media directories.
 - `AUDIO_WIDGET_UPLOAD_DIR`: writable directory for demo uploads when uploads
   are enabled. Defaults to `/tmp/audio-widget/uploads` in the image.
+- `AUDIO_WIDGET_TCP_NODELAY`: toggles `TCP_NODELAY` for the Linux sendfile
+  server. Defaults to `true`.
+- `AUDIO_WIDGET_SOCKET_SEND_BUFFER_BYTES`: optional `SO_SNDBUF` size for the
+  Linux sendfile server. Defaults to `0`, which leaves the OS default.
+- `AUDIO_WIDGET_STREAM_CACHE_CONTROL`: `Cache-Control` header for media streams.
+  Defaults to `no-store`.
 
 The GitHub workflow publishes:
 
