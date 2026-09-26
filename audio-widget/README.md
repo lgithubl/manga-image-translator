@@ -65,12 +65,18 @@ ghcr.io/lgithubl/manga-image-translator:audio-widget-latest
 - `GET /health`
 - `GET /api/stream/{base64urlPath}`
 - `GET /api/meta/{base64urlPath}`
+- `GET /api/stats`
+- `POST /api/stats/reset`
 - `POST /api/upload` with multipart field `file`
 - `GET /api/files` for demo uploads
 
 The included backend is a stateless streaming service. The upper layer owns
 security, indexes, permissions, and metadata. The backend accepts a base64url
 encoded absolute file path and streams that file with HTTP Range support.
+Runtime stats are kept in memory only and reset on process restart. They include
+stream byte counts, chunk counts, average open/seek/setup/first-chunk timings,
+upload bytes, and prefetch activity so production runs can expose whether the
+bottleneck is request setup, disk reads, network transfer, or prefetch pressure.
 
 Supported media extensions include `mp3`, `wav`, `flac`, `m4a`, `aac`, `ogg`,
 `opus`, `webm`, `mp4`, `m4v`, `mov`, and `mkv`.

@@ -3,6 +3,8 @@ use std::env;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use axum::body::Body;
@@ -41,12 +43,82 @@ const MAX_PREFETCH_BYTES: u64 = 512 * 1024 * 1024;
 struct AppState {
     data_dir: Arc<PathBuf>,
     upload_dir: Arc<PathBuf>,
+    stats: Arc<Stats>,
     initial_chunk_bytes: usize,
     read_chunk_bytes: usize,
     prefetch_bytes: u64,
     prefetch_max_tasks: usize,
     prefetch_semaphore: Arc<Semaphore>,
     prefetch_paths: Arc<Mutex<HashSet<String>>>,
+}
+
+#[derive(Default)]
+struct Stats {
+    started_at_unix: AtomicU64,
+    stream_requests: AtomicU64,
+    stream_head_requests: AtomicU64,
+    stream_range_requests: AtomicU64,
+    stream_full_requests: AtomicU64,
+    stream_errors: AtomicU64,
+    stream_completed: AtomicU64,
+    stream_bytes: AtomicU64,
+    stream_chunks: AtomicU64,
+    stream_first_chunk_us_total: AtomicU64,
+    stream_open_us_total: AtomicU64,
+    stream_seek_us_total: AtomicU64,
+    stream_setup_us_total: AtomicU64,
+    upload_requests: AtomicU64,
+    upload_bytes: AtomicU64,
+    meta_requests: AtomicU64,
+    file_list_requests: AtomicU64,
+    prefetch_scheduled: AtomicU64,
+    prefetch_skipped_disabled: AtomicU64,
+    prefetch_skipped_eof: AtomicU64,
+    prefetch_skipped_duplicate: AtomicU64,
+    prefetch_skipped_busy: AtomicU64,
+    prefetch_active: AtomicU64,
+    prefetch_completed: AtomicU64,
+    prefetch_errors: AtomicU64,
+    prefetch_bytes: AtomicU64,
+    prefetch_read_us_total: AtomicU64,
+}
+
+impl Stats {
+    fn new() -> Self {
+        let stats = Self::default();
+        stats.reset();
+        stats
+    }
+
+    fn reset(&self) {
+        self.started_at_unix.store(now_unix(), Ordering::Relaxed);
+        self.stream_requests.store(0, Ordering::Relaxed);
+        self.stream_head_requests.store(0, Ordering::Relaxed);
+        self.stream_range_requests.store(0, Ordering::Relaxed);
+        self.stream_full_requests.store(0, Ordering::Relaxed);
+        self.stream_errors.store(0, Ordering::Relaxed);
+        self.stream_completed.store(0, Ordering::Relaxed);
+        self.stream_bytes.store(0, Ordering::Relaxed);
+        self.stream_chunks.store(0, Ordering::Relaxed);
+        self.stream_first_chunk_us_total.store(0, Ordering::Relaxed);
+        self.stream_open_us_total.store(0, Ordering::Relaxed);
+        self.stream_seek_us_total.store(0, Ordering::Relaxed);
+        self.stream_setup_us_total.store(0, Ordering::Relaxed);
+        self.upload_requests.store(0, Ordering::Relaxed);
+        self.upload_bytes.store(0, Ordering::Relaxed);
+        self.meta_requests.store(0, Ordering::Relaxed);
+        self.file_list_requests.store(0, Ordering::Relaxed);
+        self.prefetch_scheduled.store(0, Ordering::Relaxed);
+        self.prefetch_skipped_disabled.store(0, Ordering::Relaxed);
+        self.prefetch_skipped_eof.store(0, Ordering::Relaxed);
+        self.prefetch_skipped_duplicate.store(0, Ordering::Relaxed);
+        self.prefetch_skipped_busy.store(0, Ordering::Relaxed);
+        self.prefetch_active.store(0, Ordering::Relaxed);
+        self.prefetch_completed.store(0, Ordering::Relaxed);
+        self.prefetch_errors.store(0, Ordering::Relaxed);
+        self.prefetch_bytes.store(0, Ordering::Relaxed);
+        self.prefetch_read_us_total.store(0, Ordering::Relaxed);
+    }
 }
 
 #[derive(Serialize)]
@@ -132,6 +204,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         data_dir: Arc::new(data_dir),
         upload_dir: Arc::new(upload_dir),
+        stats: Arc::new(Stats::new()),
         initial_chunk_bytes,
         read_chunk_bytes,
         prefetch_bytes: env_u64("AUDIO_WIDGET_PREFETCH_BYTES", 0, 0, MAX_PREFETCH_BYTES),
@@ -143,6 +216,8 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/api/config", get(config))
+        .route("/api/stats", get(stats))
+        .route("/api/stats/reset", post(reset_stats))
         .route("/api/files", get(list_files))
         .route("/api/meta/{encoded_path}", get(meta))
         .route("/api/upload", post(upload_file))
@@ -216,10 +291,21 @@ async fn config(State(state): State<AppState>) -> Json<serde_json::Value> {
         "endpoints": {
             "stream": "/api/stream/{base64urlPath}",
             "meta": "/api/meta/{base64urlPath}",
+            "stats": "/api/stats",
+            "resetStats": "/api/stats/reset",
             "upload": "/api/upload",
             "demoFiles": "/api/files"
         }
     }))
+}
+
+async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(stats_snapshot(&state))
+}
+
+async fn reset_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
+    state.stats.reset();
+    Json(stats_snapshot(&state))
 }
 
 async fn index() -> Result<Html<String>, AppError> {
@@ -230,6 +316,10 @@ async fn index() -> Result<Html<String>, AppError> {
 }
 
 async fn list_files(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
+    state
+        .stats
+        .file_list_requests
+        .fetch_add(1, Ordering::Relaxed);
     let mut files = Vec::new();
     let mut entries = fs::read_dir(&*state.upload_dir)
         .await
@@ -251,7 +341,11 @@ async fn list_files(State(state): State<AppState>) -> Result<Json<serde_json::Va
     Ok(Json(serde_json::json!({ "files": files })))
 }
 
-async fn meta(AxumPath(encoded_path): AxumPath<String>) -> Result<Json<MediaMeta>, AppError> {
+async fn meta(
+    State(state): State<AppState>,
+    AxumPath(encoded_path): AxumPath<String>,
+) -> Result<Json<MediaMeta>, AppError> {
+    state.stats.meta_requests.fetch_add(1, Ordering::Relaxed);
     let path = ensure_streamable_path(&encoded_path).await?;
     Ok(Json(file_meta(path).await?))
 }
@@ -260,6 +354,7 @@ async fn upload_file(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<Json<MediaMeta>, AppError> {
+    state.stats.upload_requests.fetch_add(1, Ordering::Relaxed);
     while let Some(field) = multipart
         .next_field()
         .await
@@ -285,6 +380,10 @@ async fn upload_file(
             .await
             .map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "failed to read upload"))?
         {
+            state
+                .stats
+                .upload_bytes
+                .fetch_add(chunk.len() as u64, Ordering::Relaxed);
             output.write_all(&chunk).await.map_err(|_| {
                 AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "failed to write upload")
             })?;
@@ -309,13 +408,48 @@ async fn stream_path(
     AxumPath(encoded_path): AxumPath<String>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let path = ensure_streamable_path(&encoded_path).await?;
-    let metadata = fs::metadata(&path)
-        .await
-        .map_err(|_| AppError::new(StatusCode::NOT_FOUND, "media file not found"))?;
+    let request_started = Instant::now();
+    state.stats.stream_requests.fetch_add(1, Ordering::Relaxed);
+    if method == Method::HEAD {
+        state
+            .stats
+            .stream_head_requests
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    let path = match ensure_streamable_path(&encoded_path).await {
+        Ok(path) => path,
+        Err(error) => {
+            state.stats.stream_errors.fetch_add(1, Ordering::Relaxed);
+            return Err(error);
+        }
+    };
+    let metadata = match fs::metadata(&path).await {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            state.stats.stream_errors.fetch_add(1, Ordering::Relaxed);
+            return Err(AppError::new(StatusCode::NOT_FOUND, "media file not found"));
+        }
+    };
     let total = metadata.len();
     let range_header = headers.get(RANGE).and_then(|value| value.to_str().ok());
-    let (status, start, end) = parse_range(range_header, total)?;
+    if range_header.is_some() {
+        state
+            .stats
+            .stream_range_requests
+            .fetch_add(1, Ordering::Relaxed);
+    } else {
+        state
+            .stats
+            .stream_full_requests
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    let (status, start, end) = match parse_range(range_header, total) {
+        Ok(range) => range,
+        Err(error) => {
+            state.stats.stream_errors.fetch_add(1, Ordering::Relaxed);
+            return Err(error);
+        }
+    };
     let length = end
         .saturating_sub(start)
         .saturating_add(if total == 0 { 0 } else { 1 });
@@ -340,24 +474,50 @@ async fn stream_path(
     }
 
     if method == Method::HEAD || length == 0 {
+        state
+            .stats
+            .stream_setup_us_total
+            .fetch_add(elapsed_us(request_started), Ordering::Relaxed);
+        state.stats.stream_completed.fetch_add(1, Ordering::Relaxed);
         return Ok((status, response_headers, Body::empty()).into_response());
     }
 
-    let mut file = File::open(&path)
-        .await
-        .map_err(|_| AppError::new(StatusCode::NOT_FOUND, "media file not found"))?;
-    file.seek(SeekFrom::Start(start)).await.map_err(|_| {
-        AppError::new(
+    let open_started = Instant::now();
+    let mut file = match File::open(&path).await {
+        Ok(file) => file,
+        Err(_) => {
+            state.stats.stream_errors.fetch_add(1, Ordering::Relaxed);
+            return Err(AppError::new(StatusCode::NOT_FOUND, "media file not found"));
+        }
+    };
+    state
+        .stats
+        .stream_open_us_total
+        .fetch_add(elapsed_us(open_started), Ordering::Relaxed);
+    let seek_started = Instant::now();
+    if file.seek(SeekFrom::Start(start)).await.is_err() {
+        state.stats.stream_errors.fetch_add(1, Ordering::Relaxed);
+        return Err(AppError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to seek media file",
-        )
-    })?;
+        ));
+    }
+    state
+        .stats
+        .stream_seek_us_total
+        .fetch_add(elapsed_us(seek_started), Ordering::Relaxed);
     spawn_prefetch(state.clone(), path.clone(), end.saturating_add(1), total).await;
+    state
+        .stats
+        .stream_setup_us_total
+        .fetch_add(elapsed_us(request_started), Ordering::Relaxed);
     let stream = stream_file_range(
         file,
         length,
         state.initial_chunk_bytes,
         state.read_chunk_bytes,
+        state.stats.clone(),
+        request_started,
     );
     Ok((status, response_headers, Body::from_stream(stream)).into_response())
 }
@@ -367,6 +527,8 @@ fn stream_file_range(
     length: u64,
     initial_chunk_size: usize,
     chunk_size: usize,
+    stats: Arc<Stats>,
+    request_started: Instant,
 ) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> {
     stream::try_unfold(
         (
@@ -375,8 +537,18 @@ fn stream_file_range(
             initial_chunk_size.max(1),
             chunk_size.max(1),
             true,
+            stats,
+            request_started,
         ),
-        |(mut file, remaining, initial_chunk_size, chunk_size, is_first)| async move {
+        |(
+            mut file,
+            remaining,
+            initial_chunk_size,
+            chunk_size,
+            is_first,
+            stats,
+            request_started,
+        )| async move {
             if remaining == 0 {
                 return Ok(None);
             }
@@ -387,22 +559,60 @@ fn stream_file_range(
             };
             let read_len = (current_chunk_size as u64).min(remaining) as usize;
             let mut buffer = vec![0; read_len];
-            let bytes_read = file.read(&mut buffer).await?;
+            let bytes_read = match file.read(&mut buffer).await {
+                Ok(bytes_read) => bytes_read,
+                Err(error) => {
+                    stats.stream_errors.fetch_add(1, Ordering::Relaxed);
+                    return Err(error);
+                }
+            };
             if bytes_read == 0 {
+                stats.stream_completed.fetch_add(1, Ordering::Relaxed);
                 return Ok(None);
             }
+            if is_first {
+                stats
+                    .stream_first_chunk_us_total
+                    .fetch_add(elapsed_us(request_started), Ordering::Relaxed);
+            }
+            stats
+                .stream_bytes
+                .fetch_add(bytes_read as u64, Ordering::Relaxed);
+            stats.stream_chunks.fetch_add(1, Ordering::Relaxed);
             buffer.truncate(bytes_read);
             let next_remaining = remaining.saturating_sub(bytes_read as u64);
+            if next_remaining == 0 {
+                stats.stream_completed.fetch_add(1, Ordering::Relaxed);
+            }
             Ok(Some((
                 Bytes::from(buffer),
-                (file, next_remaining, initial_chunk_size, chunk_size, false),
+                (
+                    file,
+                    next_remaining,
+                    initial_chunk_size,
+                    chunk_size,
+                    false,
+                    stats,
+                    request_started,
+                ),
             )))
         },
     )
 }
 
 async fn spawn_prefetch(state: AppState, path: PathBuf, start: u64, total: u64) {
-    if state.prefetch_bytes == 0 || start >= total {
+    if state.prefetch_bytes == 0 {
+        state
+            .stats
+            .prefetch_skipped_disabled
+            .fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    if start >= total {
+        state
+            .stats
+            .prefetch_skipped_eof
+            .fetch_add(1, Ordering::Relaxed);
         return;
     }
 
@@ -410,20 +620,53 @@ async fn spawn_prefetch(state: AppState, path: PathBuf, start: u64, total: u64) 
     {
         let mut paths = state.prefetch_paths.lock().await;
         if !paths.insert(key.clone()) {
+            state
+                .stats
+                .prefetch_skipped_duplicate
+                .fetch_add(1, Ordering::Relaxed);
             return;
         }
     }
+    state
+        .stats
+        .prefetch_scheduled
+        .fetch_add(1, Ordering::Relaxed);
 
     tokio::spawn(async move {
         let permit = state.prefetch_semaphore.clone().try_acquire_owned();
         if permit.is_err() {
+            state
+                .stats
+                .prefetch_skipped_busy
+                .fetch_add(1, Ordering::Relaxed);
             let mut paths = state.prefetch_paths.lock().await;
             paths.remove(&key);
             return;
         }
         let _permit = permit.ok();
+        state.stats.prefetch_active.fetch_add(1, Ordering::Relaxed);
         let length = state.prefetch_bytes.min(total.saturating_sub(start));
-        let _ = prefetch_range(&path, start, length, state.read_chunk_bytes).await;
+        let prefetch_started = Instant::now();
+        match prefetch_range(&path, start, length, state.read_chunk_bytes).await {
+            Ok(bytes_read) => {
+                state
+                    .stats
+                    .prefetch_completed
+                    .fetch_add(1, Ordering::Relaxed);
+                state
+                    .stats
+                    .prefetch_bytes
+                    .fetch_add(bytes_read, Ordering::Relaxed);
+                state
+                    .stats
+                    .prefetch_read_us_total
+                    .fetch_add(elapsed_us(prefetch_started), Ordering::Relaxed);
+            }
+            Err(_) => {
+                state.stats.prefetch_errors.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        state.stats.prefetch_active.fetch_sub(1, Ordering::Relaxed);
         let mut paths = state.prefetch_paths.lock().await;
         paths.remove(&key);
     });
@@ -434,13 +677,14 @@ async fn prefetch_range(
     start: u64,
     length: u64,
     chunk_size: usize,
-) -> Result<(), std::io::Error> {
+) -> Result<u64, std::io::Error> {
     if length == 0 {
-        return Ok(());
+        return Ok(0);
     }
     let mut file = File::open(path).await?;
     file.seek(SeekFrom::Start(start)).await?;
     let mut remaining = length;
+    let mut total_read = 0;
     let mut buffer = vec![0; chunk_size.max(1)];
     while remaining > 0 {
         let read_len = (buffer.len() as u64).min(remaining) as usize;
@@ -448,14 +692,84 @@ async fn prefetch_range(
         if bytes_read == 0 {
             break;
         }
+        total_read += bytes_read as u64;
         remaining = remaining.saturating_sub(bytes_read as u64);
     }
-    Ok(())
+    Ok(total_read)
 }
 
 fn header_value(value: &str) -> Result<HeaderValue, AppError> {
     HeaderValue::from_str(value)
         .map_err(|_| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "invalid response header"))
+}
+
+fn stats_snapshot(state: &AppState) -> serde_json::Value {
+    let stats = &state.stats;
+    let started_at = stats.started_at_unix.load(Ordering::Relaxed);
+    let stream_requests = stats.stream_requests.load(Ordering::Relaxed);
+    let stream_completed = stats.stream_completed.load(Ordering::Relaxed);
+    let stream_chunks = stats.stream_chunks.load(Ordering::Relaxed);
+    let prefetch_completed = stats.prefetch_completed.load(Ordering::Relaxed);
+    serde_json::json!({
+        "startedAtUnix": started_at,
+        "uptimeSeconds": now_unix().saturating_sub(started_at),
+        "config": {
+            "initialChunkBytes": state.initial_chunk_bytes,
+            "readChunkBytes": state.read_chunk_bytes,
+            "prefetchBytes": state.prefetch_bytes,
+            "prefetchMaxTasks": state.prefetch_max_tasks,
+        },
+        "requests": {
+            "fileList": stats.file_list_requests.load(Ordering::Relaxed),
+            "meta": stats.meta_requests.load(Ordering::Relaxed),
+            "upload": stats.upload_requests.load(Ordering::Relaxed),
+            "uploadBytes": stats.upload_bytes.load(Ordering::Relaxed),
+        },
+        "stream": {
+            "requests": stream_requests,
+            "headRequests": stats.stream_head_requests.load(Ordering::Relaxed),
+            "rangeRequests": stats.stream_range_requests.load(Ordering::Relaxed),
+            "fullRequests": stats.stream_full_requests.load(Ordering::Relaxed),
+            "errors": stats.stream_errors.load(Ordering::Relaxed),
+            "completed": stream_completed,
+            "bytes": stats.stream_bytes.load(Ordering::Relaxed),
+            "chunks": stream_chunks,
+            "avgBytesPerRequest": avg_u64(stats.stream_bytes.load(Ordering::Relaxed), stream_completed),
+            "avgBytesPerChunk": avg_u64(stats.stream_bytes.load(Ordering::Relaxed), stream_chunks),
+            "avgFirstChunkUs": avg_u64(stats.stream_first_chunk_us_total.load(Ordering::Relaxed), stream_chunks.min(stream_requests)),
+            "avgOpenUs": avg_u64(stats.stream_open_us_total.load(Ordering::Relaxed), stream_requests),
+            "avgSeekUs": avg_u64(stats.stream_seek_us_total.load(Ordering::Relaxed), stream_requests),
+            "avgSetupUs": avg_u64(stats.stream_setup_us_total.load(Ordering::Relaxed), stream_requests),
+        },
+        "prefetch": {
+            "scheduled": stats.prefetch_scheduled.load(Ordering::Relaxed),
+            "active": stats.prefetch_active.load(Ordering::Relaxed),
+            "completed": prefetch_completed,
+            "errors": stats.prefetch_errors.load(Ordering::Relaxed),
+            "bytes": stats.prefetch_bytes.load(Ordering::Relaxed),
+            "skippedDisabled": stats.prefetch_skipped_disabled.load(Ordering::Relaxed),
+            "skippedEof": stats.prefetch_skipped_eof.load(Ordering::Relaxed),
+            "skippedDuplicate": stats.prefetch_skipped_duplicate.load(Ordering::Relaxed),
+            "skippedBusy": stats.prefetch_skipped_busy.load(Ordering::Relaxed),
+            "avgBytes": avg_u64(stats.prefetch_bytes.load(Ordering::Relaxed), prefetch_completed),
+            "avgReadUs": avg_u64(stats.prefetch_read_us_total.load(Ordering::Relaxed), prefetch_completed),
+        }
+    })
+}
+
+fn avg_u64(total: u64, count: u64) -> u64 {
+    if count == 0 { 0 } else { total / count }
+}
+
+fn elapsed_us(started: Instant) -> u64 {
+    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn env_usize(name: &str, default: usize, min: usize, max: usize) -> usize {
