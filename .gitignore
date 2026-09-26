@@ -20,8 +20,6 @@ include
 share
 .DS_Store
 dev/
-audio-widget/target/
-audio-widget/data/
 
 # Distribution / packaging
 .Python
