@@ -1,0 +1,486 @@
+use std::env;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use axum::body::Body;
+use axum::extract::{Multipart, Path as AxumPath, State};
+use axum::http::header::{
+    ACCEPT_RANGES, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HeaderMap,
+    HeaderValue, RANGE,
+};
+use axum::http::{Method, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use futures_util::TryStreamExt;
+use serde::Serialize;
+use tokio::fs::{self, File};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
+use tokio_util::io::ReaderStream;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::{ServeDir, ServeFile};
+
+const MEDIA_EXTENSIONS: &[&str] = &[
+    "aac", "flac", "m4a", "mp3", "ogg", "opus", "wav", "webm", "m4v", "mkv", "mov", "mp4",
+];
+
+#[derive(Clone)]
+struct AppState {
+    data_dir: Arc<PathBuf>,
+    upload_dir: Arc<PathBuf>,
+}
+
+#[derive(Serialize)]
+struct MediaMeta {
+    id: String,
+    path: String,
+    name: String,
+    #[serde(rename = "contentType")]
+    content_type: String,
+    size: u64,
+    mtime: u64,
+    #[serde(rename = "streamUrl")]
+    stream_url: String,
+}
+
+#[derive(Debug)]
+struct AppError {
+    status: StatusCode,
+    detail: String,
+    headers: HeaderMap,
+}
+
+impl AppError {
+    fn new(status: StatusCode, detail: impl Into<String>) -> Self {
+        Self {
+            status,
+            detail: detail.into(),
+            headers: HeaderMap::new(),
+        }
+    }
+
+    fn with_header(mut self, name: axum::http::header::HeaderName, value: String) -> Self {
+        if let Ok(value) = HeaderValue::from_str(&value) {
+            self.headers.insert(name, value);
+        }
+        self
+    }
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        let mut response = (
+            self.status,
+            Json(serde_json::json!({ "detail": self.detail })),
+        )
+            .into_response();
+        response.headers_mut().extend(self.headers);
+        response
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let root = env::current_dir().context("resolve current directory")?;
+    let public_dir = root.join("public");
+    let data_dir = env::var("AUDIO_WIDGET_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| root.join("data"));
+    let upload_dir = data_dir.join("uploads");
+
+    fs::create_dir_all(&upload_dir)
+        .await
+        .context("create upload dir")?;
+
+    let state = AppState {
+        data_dir: Arc::new(data_dir),
+        upload_dir: Arc::new(upload_dir),
+    };
+
+    let app = Router::new()
+        .route("/health", get(health))
+        .route("/api/config", get(config))
+        .route("/api/files", get(list_files))
+        .route("/api/meta/{encoded_path}", get(meta))
+        .route("/api/upload", post(upload_file))
+        .route("/upload", post(upload_file))
+        .route(
+            "/api/stream/{encoded_path}",
+            get(stream_path).head(stream_path),
+        )
+        .route(
+            "/files/{encoded_path}/stream",
+            get(stream_path).head(stream_path),
+        )
+        .route_service(
+            "/audio-widget.js",
+            ServeFile::new(public_dir.join("audio-widget.js")),
+        )
+        .route_service(
+            "/audio-widget.css",
+            ServeFile::new(public_dir.join("audio-widget.css")),
+        )
+        .nest_service("/assets", ServeDir::new(&public_dir))
+        .route("/", get(index))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
+        .with_state(state);
+
+    let host = env::var("AUDIO_WIDGET_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let port = env::var("AUDIO_WIDGET_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(8080);
+    let addr: SocketAddr = format!("{host}:{port}")
+        .parse()
+        .context("parse bind address")?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .context("bind server")?;
+    axum::serve(listener, app).await.context("serve app")?;
+    Ok(())
+}
+
+async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "ok": true,
+        "mode": "path-stream",
+        "runtime": "rust",
+        "dataDir": state.data_dir.to_string_lossy(),
+    }))
+}
+
+async fn config() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "apiVersion": "0.3.0",
+        "mode": "path-stream",
+        "runtime": "rust",
+        "mediaExtensions": MEDIA_EXTENSIONS,
+        "audioExtensions": ["aac", "flac", "m4a", "mp3", "ogg", "opus", "wav", "webm"],
+        "videoExtensions": ["m4v", "mkv", "mov", "mp4", "webm"],
+        "endpoints": {
+            "stream": "/api/stream/{base64urlPath}",
+            "meta": "/api/meta/{base64urlPath}",
+            "upload": "/api/upload",
+            "demoFiles": "/api/files"
+        }
+    }))
+}
+
+async fn index() -> Result<Html<String>, AppError> {
+    let body = fs::read_to_string("public/index.html")
+        .await
+        .map_err(|_| AppError::new(StatusCode::NOT_FOUND, "index not found"))?;
+    Ok(Html(body))
+}
+
+async fn list_files(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
+    let mut files = Vec::new();
+    let mut entries = fs::read_dir(&*state.upload_dir)
+        .await
+        .map_err(|_| AppError::new(StatusCode::NOT_FOUND, "upload dir not found"))?;
+    while let Some(entry) = entries.next_entry().await.map_err(|_| {
+        AppError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to read upload dir",
+        )
+    })? {
+        let path = entry.path();
+        if path.is_file() && is_media_name(&path) {
+            if let Ok(meta) = file_meta(path).await {
+                files.push(meta);
+            }
+        }
+    }
+    files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(Json(serde_json::json!({ "files": files })))
+}
+
+async fn meta(AxumPath(encoded_path): AxumPath<String>) -> Result<Json<MediaMeta>, AppError> {
+    let path = ensure_streamable_path(&encoded_path).await?;
+    Ok(Json(file_meta(path).await?))
+}
+
+async fn upload_file(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Json<MediaMeta>, AppError> {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "invalid multipart body"))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let filename = safe_name(field.file_name().unwrap_or("upload"));
+        if !is_media_name(Path::new(&filename)) {
+            return Err(AppError::new(
+                StatusCode::BAD_REQUEST,
+                "unsupported media extension",
+            ));
+        }
+        let target = unique_upload_path(&state.upload_dir, &filename).await?;
+        let mut output = File::create(&target).await.map_err(|_| {
+            AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "failed to create upload")
+        })?;
+        let mut stream = field.into_stream();
+        while let Some(chunk) = stream
+            .try_next()
+            .await
+            .map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "failed to read upload"))?
+        {
+            output.write_all(&chunk).await.map_err(|_| {
+                AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "failed to write upload")
+            })?;
+        }
+        let canonical = target.canonicalize().map_err(|_| {
+            AppError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to resolve upload",
+            )
+        })?;
+        return Ok(Json(file_meta(canonical).await?));
+    }
+    Err(AppError::new(
+        StatusCode::BAD_REQUEST,
+        "file field is required",
+    ))
+}
+
+async fn stream_path(
+    method: Method,
+    AxumPath(encoded_path): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let path = ensure_streamable_path(&encoded_path).await?;
+    let metadata = fs::metadata(&path)
+        .await
+        .map_err(|_| AppError::new(StatusCode::NOT_FOUND, "media file not found"))?;
+    let total = metadata.len();
+    let range_header = headers.get(RANGE).and_then(|value| value.to_str().ok());
+    let (status, start, end) = parse_range(range_header, total)?;
+    let length = end
+        .saturating_sub(start)
+        .saturating_add(if total == 0 { 0 } else { 1 });
+    let content_type = mime_guess::from_path(&path)
+        .first_or_octet_stream()
+        .to_string();
+
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response_headers.insert(CONTENT_TYPE, header_value(&content_type)?);
+    response_headers.insert(CONTENT_LENGTH, header_value(&length.to_string())?);
+    response_headers.insert(
+        "x-media-path-encoded",
+        header_value(&encode_path(path.to_string_lossy().as_ref()))?,
+    );
+    if status == StatusCode::PARTIAL_CONTENT {
+        response_headers.insert(
+            CONTENT_RANGE,
+            header_value(&format!("bytes {start}-{end}/{total}"))?,
+        );
+    }
+
+    if method == Method::HEAD || length == 0 {
+        return Ok((status, response_headers, Body::empty()).into_response());
+    }
+
+    let mut file = File::open(&path)
+        .await
+        .map_err(|_| AppError::new(StatusCode::NOT_FOUND, "media file not found"))?;
+    file.seek(SeekFrom::Start(start)).await.map_err(|_| {
+        AppError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to seek media file",
+        )
+    })?;
+    let stream = ReaderStream::new(file.take(length));
+    Ok((status, response_headers, Body::from_stream(stream)).into_response())
+}
+
+fn header_value(value: &str) -> Result<HeaderValue, AppError> {
+    HeaderValue::from_str(value)
+        .map_err(|_| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "invalid response header"))
+}
+
+fn safe_name(value: &str) -> String {
+    let basename = Path::new(value)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("upload");
+    let cleaned = basename
+        .chars()
+        .map(|ch| match ch {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            _ => ch,
+        })
+        .collect::<String>()
+        .trim_matches('.')
+        .trim()
+        .to_string();
+    if cleaned.is_empty() {
+        "upload".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn is_media_name(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| MEDIA_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+fn encode_path(path: &str) -> String {
+    URL_SAFE_NO_PAD.encode(path.as_bytes())
+}
+
+fn decode_path(value: &str) -> Result<PathBuf, AppError> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(value.as_bytes())
+        .map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "invalid encoded path"))?;
+    let path = String::from_utf8(decoded)
+        .map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "invalid encoded path"))?;
+    if path.is_empty() {
+        return Err(AppError::new(StatusCode::BAD_REQUEST, "empty path"));
+    }
+    Ok(PathBuf::from(path))
+}
+
+async fn ensure_streamable_path(encoded_path: &str) -> Result<PathBuf, AppError> {
+    let path = decode_path(encoded_path)?;
+    if !is_media_name(&path) {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "unsupported media extension",
+        ));
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| AppError::new(StatusCode::NOT_FOUND, "media file not found"))?;
+    let metadata = fs::metadata(&canonical)
+        .await
+        .map_err(|_| AppError::new(StatusCode::NOT_FOUND, "media file not found"))?;
+    if !metadata.is_file() {
+        return Err(AppError::new(StatusCode::NOT_FOUND, "media file not found"));
+    }
+    Ok(canonical)
+}
+
+async fn file_meta(path: PathBuf) -> Result<MediaMeta, AppError> {
+    let metadata = fs::metadata(&path)
+        .await
+        .map_err(|_| AppError::new(StatusCode::NOT_FOUND, "media file not found"))?;
+    let mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let path_string = path.to_string_lossy().to_string();
+    let id = encode_path(&path_string);
+    Ok(MediaMeta {
+        id: id.clone(),
+        path: path_string,
+        name: path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("media")
+            .to_string(),
+        content_type: mime_guess::from_path(&path)
+            .first_or_octet_stream()
+            .to_string(),
+        size: metadata.len(),
+        mtime,
+        stream_url: format!("/api/stream/{id}"),
+    })
+}
+
+async fn unique_upload_path(upload_dir: &Path, filename: &str) -> Result<PathBuf, AppError> {
+    let stem = Path::new(filename)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("media");
+    let suffix = Path::new(filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    let mut candidate = upload_dir.join(format!("{stem}{suffix}"));
+    let mut index = 2;
+    while fs::try_exists(&candidate).await.map_err(|_| {
+        AppError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to check upload path",
+        )
+    })? {
+        candidate = upload_dir.join(format!("{stem}-{index}{suffix}"));
+        index += 1;
+    }
+    Ok(candidate)
+}
+
+fn parse_range(range_header: Option<&str>, total: u64) -> Result<(StatusCode, u64, u64), AppError> {
+    if total == 0 {
+        return Ok((StatusCode::OK, 0, 0));
+    }
+    let Some(range) = range_header else {
+        return Ok((StatusCode::OK, 0, total - 1));
+    };
+    let Some(raw) = range.trim().strip_prefix("bytes=") else {
+        return Err(
+            AppError::new(StatusCode::RANGE_NOT_SATISFIABLE, "invalid range")
+                .with_header(CONTENT_RANGE, format!("bytes */{total}")),
+        );
+    };
+    let Some((raw_start, raw_end)) = raw.split_once('-') else {
+        return Err(
+            AppError::new(StatusCode::RANGE_NOT_SATISFIABLE, "invalid range")
+                .with_header(CONTENT_RANGE, format!("bytes */{total}")),
+        );
+    };
+
+    let (start, end) = if raw_start.is_empty() {
+        let length = raw_end.parse::<u64>().unwrap_or(0);
+        if length == 0 {
+            return Err(
+                AppError::new(StatusCode::RANGE_NOT_SATISFIABLE, "range not satisfiable")
+                    .with_header(CONTENT_RANGE, format!("bytes */{total}")),
+            );
+        }
+        (total.saturating_sub(length), total - 1)
+    } else {
+        let start = raw_start.parse::<u64>().map_err(|_| {
+            AppError::new(StatusCode::RANGE_NOT_SATISFIABLE, "invalid range")
+                .with_header(CONTENT_RANGE, format!("bytes */{total}"))
+        })?;
+        let end = if raw_end.is_empty() {
+            total - 1
+        } else {
+            raw_end.parse::<u64>().map_err(|_| {
+                AppError::new(StatusCode::RANGE_NOT_SATISFIABLE, "invalid range")
+                    .with_header(CONTENT_RANGE, format!("bytes */{total}"))
+            })?
+        };
+        (start, end.min(total - 1))
+    };
+
+    if start >= total || end < start {
+        return Err(
+            AppError::new(StatusCode::RANGE_NOT_SATISFIABLE, "range not satisfiable")
+                .with_header(CONTENT_RANGE, format!("bytes */{total}")),
+        );
+    }
+    Ok((StatusCode::PARTIAL_CONTENT, start, end))
+}

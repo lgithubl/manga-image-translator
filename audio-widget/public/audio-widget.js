@@ -1,7 +1,8 @@
 (function () {
   "use strict";
 
-  const AUDIO_EXTENSIONS = /\.(mp3|wav|m4a|aac|flac|ogg|opus|webm)$/i;
+  const MEDIA_EXTENSIONS = /\.(mp3|wav|m4a|aac|flac|ogg|opus|webm|mp4|m4v|mov|mkv)$/i;
+  const VIDEO_EXTENSIONS = /\.(mp4|m4v|mov|mkv|webm)$/i;
 
   function formatBytes(value) {
     const size = Number(value || 0);
@@ -80,12 +81,17 @@
       };
     }
 
+    function mediaElement(file) {
+      const tag = VIDEO_EXTENSIONS.test(file.name || file.path || "") ? "video" : "audio";
+      return `<${tag} controls preload="metadata" src="${escapeHtml(streamUrl(file))}"></${tag}>`;
+    }
+
     function render() {
       const selected = state.selected;
       root.innerHTML = `
         <div class="aw-root">
           <div class="aw-toolbar">
-            <input type="file" data-aw-file accept="audio/*" ${config.uploadEnabled ? "" : "disabled"}>
+            <input type="file" data-aw-file accept="audio/*,video/*" ${config.uploadEnabled ? "" : "disabled"}>
             <button class="aw-button" data-aw-upload ${state.busy || !config.uploadEnabled ? "disabled" : ""}>Upload</button>
             <button class="aw-button" data-aw-refresh ${state.busy ? "disabled" : ""}>Refresh</button>
           </div>
@@ -93,7 +99,7 @@
           ${selected ? `
             <section class="aw-player">
               <strong>${escapeHtml(selected.name)}</strong>
-              <audio controls preload="metadata" src="${escapeHtml(streamUrl(selected))}"></audio>
+              ${mediaElement(selected)}
             </section>
           ` : ""}
           <section class="aw-list">
@@ -103,7 +109,7 @@
                 <span class="aw-meta">${escapeHtml(formatBytes(file.size))}</span>
                 <button class="aw-button" data-aw-play="${escapeHtml(file.id)}">Play</button>
               </div>
-            `).join("") || '<div class="aw-message">No audio files yet.</div>'}
+            `).join("") || '<div class="aw-message">No media files yet.</div>'}
           </section>
         </div>
       `;
@@ -124,10 +130,10 @@
       render();
       try {
         if (config.tracks) {
-          state.files = config.tracks.map(normalizeTrack).filter((file) => file.id && AUDIO_EXTENSIONS.test(file.name || file.path || ""));
+          state.files = config.tracks.map(normalizeTrack).filter((file) => file.id && MEDIA_EXTENSIONS.test(file.name || file.path || ""));
         } else {
           const data = await requestJson(joinUrl(config.apiBase, "/api/files"));
-          state.files = (data.files || []).filter((file) => AUDIO_EXTENSIONS.test(file.name || ""));
+          state.files = (data.files || []).filter((file) => MEDIA_EXTENSIONS.test(file.name || ""));
         }
         if (state.selected && !state.files.some((file) => file.id === state.selected.id)) {
           state.selected = null;
@@ -145,7 +151,7 @@
       const input = root.querySelector("[data-aw-file]");
       const file = input?.files?.[0];
       if (!file) {
-        state.message = "Choose an audio file first.";
+        state.message = "Choose a media file first.";
         render();
         return;
       }

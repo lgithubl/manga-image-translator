@@ -1,19 +1,17 @@
 # Audio Widget
 
-Embeddable audio frontend plus a deployable baseline backend.
+Embeddable audio frontend plus a deployable Rust streaming backend.
 
 The frontend uses native `<audio>` playback. Large files are streamed by URL; the
 server supports byte ranges so MP3/WAV files can seek without downloading the
-whole file.
+whole file. The same backend stream API also supports common video containers;
+an embedding site can use the returned stream URL in a native `<video>` element.
 
 ## Local
 
 ```bash
 cd audio-widget
-python -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-uvicorn server:app --host 127.0.0.1 --port 8080
+cargo run
 ```
 
 Open `http://127.0.0.1:8080`.
@@ -62,6 +60,9 @@ ghcr.io/lgithubl/manga-image-translator:audio-widget-latest
 The included backend is a stateless streaming service. The upper layer owns
 security, indexes, permissions, and metadata. The backend accepts a base64url
 encoded absolute file path and streams that file with HTTP Range support.
+
+Supported media extensions include `mp3`, `wav`, `flac`, `m4a`, `aac`, `ogg`,
+`opus`, `webm`, `mp4`, `m4v`, `mov`, and `mkv`.
 
 Demo uploads are still available and are stored under `/data/uploads`, but they
 are not the production data model.

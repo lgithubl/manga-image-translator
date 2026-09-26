@@ -94,8 +94,14 @@ main {
   background: white;
 }
 
-.aw-player audio {
+.aw-player audio,
+.aw-player video {
   width: 100%;
+}
+
+.aw-player video {
+  max-height: min(70vh, 720px);
+  background: #111827;
 }
 
 @media (max-width: 640px) {
