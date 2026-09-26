@@ -1,0 +1,70 @@
+name: Build Audio Widget Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag to publish
+        required: true
+        default: latest
+      export_artifact:
+        description: Export image tar.gz artifact
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build and publish audio widget image
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image name
+        id: image
+        shell: bash
+        run: |
+          IMAGE="ghcr.io/${{ github.repository }}:audio-widget-${{ inputs.tag }}"
+          echo "image=${IMAGE,,}" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=audio-widget-${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: audio-widget
+          file: audio-widget/Dockerfile
+          push: true
+          tags: ${{ steps.image.outputs.image }}
+          cache-from: type=gha,scope=audio-widget
+          cache-to: type=gha,mode=max,scope=audio-widget
+
+      - name: Export image tarball
+        if: ${{ inputs.export_artifact }}
+        run: |
+          docker pull "${{ steps.image.outputs.image }}"
+          docker save "${{ steps.image.outputs.image }}" | gzip -1 > "${{ steps.image.outputs.artifact_name }}.tar.gz"
+
+      - name: Upload image artifact
+        if: ${{ inputs.export_artifact }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.image.outputs.artifact_name }}
+          path: ${{ steps.image.outputs.artifact_name }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
