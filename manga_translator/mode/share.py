@@ -23,10 +23,17 @@ SAFE_PICKLE_MODULES = frozenset({
     'manga_translator.utils.generic',
     'manga_translator.config'
 })
+SAFE_PICKLE_CLASSES = frozenset({
+    ('fractions', 'Fraction'),
+})
 
 class RestrictedUnpickler(pickle.Unpickler):
     def find_class(self, module: str, name: str):
-        if module in SAFE_PICKLE_MODULES or module.startswith('PIL.'):
+        if (
+            module in SAFE_PICKLE_MODULES
+            or module.startswith('PIL.')
+            or (module, name) in SAFE_PICKLE_CLASSES
+        ):
             return super().find_class(module, name)
         raise pickle.UnpicklingError(
             f"Deserialization of {module}.{name} is not allowed"
@@ -131,7 +138,7 @@ class MangaShare:
         if config:
             self.manga.font_path = getattr(config, 'font_path', None)
 
-    async def listen(self, translation_params: dict = None):
+    def create_app(self):
         app = FastAPI()
 
         @app.get("/is_locked")
@@ -144,37 +151,58 @@ class MangaShare:
         async def execute_method(request: Request, method_name: str = Path(...)):
             self.check_nonce(request)
             self.check_lock()
-            method = self.get_fn(method_name)
-            attr = restricted_loads(await request.body())
-            self.apply_task_config(attr)
+            should_release_lock = True
             try:
+                method = self.get_fn(method_name)
+                attr = restricted_loads(await request.body())
+                self.apply_task_config(attr)
+
                 if asyncio.iscoroutinefunction(method):
                     result = await method(**attr)
                 else:
                     result = method(**attr)
-                self.lock.release()
+
                 result_bytes = pickle.dumps(result)
                 return Response(content=result_bytes, media_type="application/octet-stream")
+            except HTTPException:
+                raise
             except Exception as e:
-                self.lock.release()
                 raise HTTPException(status_code=500, detail=str(e))
+            finally:
+                if should_release_lock:
+                    self.lock.release()
 
         @app.post("/execute/{method_name}")
         async def execute_method(request: Request, method_name: str = Path(...)):
             self.check_nonce(request)
             self.check_lock()
-            method = self.get_fn(method_name)
-            attr = restricted_loads(await request.body())
-            self.apply_task_config(attr)
+            should_release_lock = True
+            try:
+                method = self.get_fn(method_name)
+                attr = restricted_loads(await request.body())
+                self.apply_task_config(attr)
 
-            # 根据端点类型决定是否使用占位符优化
-            config = attr.get('config')
-            self.manga._is_streaming_mode = getattr(config, '_web_frontend_optimized', False) if config else False
+                # 根据端点类型决定是否使用占位符优化
+                config = attr.get('config')
+                self.manga._is_streaming_mode = getattr(config, '_web_frontend_optimized', False) if config else False
 
-            # streaming response
-            streaming_response = StreamingResponse(self.progress_stream(), media_type="application/octet-stream")
-            asyncio.create_task(self.run_method(method, **attr))
-            return streaming_response
+                # streaming response
+                streaming_response = StreamingResponse(self.progress_stream(), media_type="application/octet-stream")
+                asyncio.create_task(self.run_method(method, **attr))
+                should_release_lock = False
+                return streaming_response
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+            finally:
+                if should_release_lock:
+                    self.lock.release()
+
+        return app
+
+    async def listen(self, translation_params: dict = None):
+        app = self.create_app()
 
         config = uvicorn.Config(app, host=self.host, port=self.port)
         server = uvicorn.Server(config)
