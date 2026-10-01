@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      1.0.11
+// @version      1.0.12
 // @description  Collect manga images, submit translations, and provide context-menu translation/TTS helpers.
 // @match        *://*/*
 // @run-at       document-start
@@ -11,6 +11,7 @@
 // @grant        GM_addStyle
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
 // @connect      *
 // ==/UserScript==
@@ -63,6 +64,7 @@
     panelLeft: null,
     panelTop: null,
     popupBlockHosts: {},
+    enabledHosts: [],
     assistant: {
       textTranslatePath: "http://127.0.0.1:5003/v1/chat/completions",
       ttsPath: "http://127.0.0.1:5003/assistant/tts",
@@ -97,6 +99,13 @@
   const externalContextMenuActions = new Map();
   let contextMenuShownAt = 0;
   let contextMenuStickyUntil = 0;
+
+  registerHostToggleMenu();
+  if (!isCurrentHostEnabled()) {
+    console.info(`[Manga Image Translator Submitter] disabled on ${location.hostname || location.href}`);
+    return;
+  }
+
   installEarlyPanelShield();
   installExternalContextMenuBridge();
 
@@ -123,6 +132,7 @@
         queue: Array.isArray(local.queue) ? local.queue : [],
         resultsCount: local.resultsCount || 0,
         lastMessage: local.lastMessage || "",
+        enabledHosts: normalizeEnabledHosts(global.enabledHosts),
         assistant: loadedAssistant,
       };
     } catch (_) {
@@ -149,6 +159,7 @@
       panelLeft: state.panelLeft,
       panelTop: state.panelTop,
       popupBlockHosts: state.popupBlockHosts || {},
+      enabledHosts: normalizeEnabledHosts(state.enabledHosts),
       assistant: {
         ...state.assistant,
         history: (state.assistant?.history || []).slice(-100),
@@ -156,6 +167,63 @@
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(localPersisted));
     writeGlobalState(globalPersisted);
+  }
+
+  function registerHostToggleMenu() {
+    const host = getCurrentHost();
+    const enabled = isCurrentHostEnabled();
+    GM_registerMenuCommand(`Manga Translator: ${enabled ? "禁用" : "启用"}当前域名 (${host || "当前页面"})`, () => {
+      setCurrentHostEnabled(!enabled);
+      window.alert(`Manga Translator 已${enabled ? "禁用" : "启用"}当前域名，刷新页面后生效。`);
+      location.reload();
+    });
+    GM_registerMenuCommand("Manga Translator: 管理启用域名", () => {
+      const current = normalizeEnabledHosts(state.enabledHosts).join(", ");
+      const next = window.prompt("输入启用域名，逗号分隔；支持 *.example.com；留空表示不启用任何域名：", current);
+      if (next === null) return;
+      state.enabledHosts = normalizeEnabledHosts(next.split(","));
+      saveState();
+      window.alert("Manga Translator 启用域名已更新，刷新页面后生效。");
+      location.reload();
+    });
+  }
+
+  function getCurrentHost() {
+    return String(location.hostname || "").toLowerCase();
+  }
+
+  function isCurrentHostEnabled() {
+    return isHostEnabled(getCurrentHost(), state.enabledHosts);
+  }
+
+  function setCurrentHostEnabled(enabled) {
+    const host = getCurrentHost();
+    if (!host) return;
+    const hosts = normalizeEnabledHosts(state.enabledHosts).filter((item) => item !== host);
+    if (enabled) hosts.push(host);
+    state.enabledHosts = hosts;
+    saveState();
+  }
+
+  function isHostEnabled(host, enabledHosts) {
+    const value = String(host || "").toLowerCase();
+    if (!value) return false;
+    return normalizeEnabledHosts(enabledHosts).some((item) => {
+      if (item === "*") return true;
+      if (item.startsWith("*.")) {
+        const domain = item.slice(2);
+        return value === domain || value.endsWith(`.${domain}`);
+      }
+      return value === item;
+    });
+  }
+
+  function normalizeEnabledHosts(value) {
+    const source = Array.isArray(value) ? value : String(value || "").split(",");
+    return Array.from(new Set(source
+      .map((item) => String(item || "").trim().toLowerCase())
+      .map((item) => item.replace(/^https?:\/\//, "").replace(/\/.*$/, ""))
+      .filter(Boolean)));
   }
 
   function readGlobalState() {
@@ -481,9 +549,49 @@
     return String(window.getSelection?.() || "").trim();
   }
 
+  function selectedContextText(target) {
+    return selectedPageText() || selectedEditableText(getEditableTarget(target));
+  }
+
+  function getEditableTarget(target) {
+    const element = target?.closest?.("input, textarea, [contenteditable]");
+    if (!element) return null;
+    if (element.matches("input, textarea")) {
+      if (element.disabled || element.readOnly) return null;
+      return element;
+    }
+    return element.isContentEditable ? element : null;
+  }
+
+  function selectedEditableText(target) {
+    if (!target) return "";
+    if (target.matches?.("input, textarea")) {
+      const start = Number(target.selectionStart || 0);
+      const end = Number(target.selectionEnd || 0);
+      return end > start ? String(target.value || "").slice(start, end) : "";
+    }
+    const selection = window.getSelection?.();
+    if (!selection || selection.rangeCount <= 0 || selection.isCollapsed) return "";
+    const range = selection.getRangeAt(0);
+    return target.contains(range.commonAncestorContainer) ? String(selection).trim() : "";
+  }
+
+  function editableSelectionRange(target) {
+    if (!target || target.matches?.("input, textarea")) return null;
+    const selection = window.getSelection?.();
+    if (!selection || selection.rangeCount <= 0) return null;
+    const range = selection.getRangeAt(0);
+    return target.contains(range.commonAncestorContainer) ? range.cloneRange() : null;
+  }
+
   function linkHrefFromTarget(target) {
     const link = target?.closest?.("a[href]");
     return link ? absoluteUrl(link.href || link.getAttribute("href") || "") : "";
+  }
+
+  function linkTextFromTarget(target) {
+    const link = target?.closest?.("a[href]");
+    return link ? String(link.textContent || "").trim() : "";
   }
 
   function hasDownloadLinkText(text) {
@@ -542,6 +650,8 @@
         if (action.match === "image") return Boolean(context.imageUrl);
         if (action.match === "text") return Boolean(context.text);
         if (action.match === "copyable") return Boolean(context.text || context.linkHref);
+        if (action.match === "cuttable") return Boolean(context.canCut);
+        if (action.match === "pasteable") return Boolean(context.canPaste);
         if (action.match === "link") return Boolean(context.linkHref);
         return true;
       })
@@ -2443,6 +2553,12 @@
       imageUrl: context.imageUrl || "",
       text: context.text || "",
       linkHref: context.linkHref || "",
+      linkText: context.linkText || "",
+      editableTarget: context.editableTarget || null,
+      editableText: context.editableText || "",
+      editableRange: context.editableRange || null,
+      canCut: Boolean(context.canCut),
+      canPaste: Boolean(context.canPaste),
       pageUrl: location.href,
     };
     const imageButton = menu.querySelector('[data-menu-action="translateImage"]');
@@ -2493,7 +2609,7 @@
   function hideContextMenu() {
     if (!contextMenu) return;
     contextMenu.style.display = "none";
-    menuContext = { imageUrl: "", text: "" };
+    menuContext = { imageUrl: "", text: "", linkHref: "", linkText: "", editableTarget: null, editableText: "", editableRange: null, canCut: false, canPaste: false };
     contextMenuStickyUntil = 0;
   }
 
@@ -2507,13 +2623,27 @@
       const target = event.target;
       const image = target?.closest?.("img");
       const imageUrl = image ? imageUrlFromElement(image) : "";
-      const text = selectedPageText();
+      const editableTarget = getEditableTarget(target);
+      const editableText = selectedEditableText(editableTarget);
+      const text = selectedContextText(target);
       const linkHref = linkHrefFromTarget(target);
-      if (!imageUrl && !text) return;
+      const context = {
+        imageUrl,
+        text,
+        linkHref,
+        linkText: linkTextFromTarget(target),
+        editableTarget,
+        editableText,
+        editableRange: editableSelectionRange(editableTarget),
+        canCut: Boolean(editableTarget && editableText),
+        canPaste: Boolean(editableTarget),
+        pageUrl: location.href,
+      };
+      if (!imageUrl && !text && !getExternalContextMenuActions(context).length) return;
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
-      showContextMenu(event, { imageUrl, text, linkHref });
+      showContextMenu(event, context);
       ensureTopLayer(true);
     }, true);
     ["pointerdown", "click", "keydown", "scroll", "resize"].forEach((type) => {
