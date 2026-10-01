@@ -74,9 +74,49 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Export image tarball
+      - name: Smoke test image
+        shell: bash
         run: |
           docker pull "${{ steps.tags.outputs.image }}"
+          docker run --rm -i --entrypoint python "${{ steps.tags.outputs.image }}" - <<'PY'
+          import importlib.util
+          import torch
+
+          print("torch", torch.__version__)
+          print("cuda_version", torch.version.cuda)
+          print("cuda_available", torch.cuda.is_available())
+          assert importlib.util.find_spec("fastapi") is not None
+          assert importlib.util.find_spec("uvicorn") is not None
+          assert importlib.util.find_spec("cv2") is not None
+          assert importlib.util.find_spec("PIL") is not None
+          PY
+          docker run --rm "${{ steps.tags.outputs.image }}" --help >/tmp/mit-help.txt
+          test -s /tmp/mit-help.txt
+
+      - name: Validate CUDA image contract without GPU
+        if: ${{ inputs.variant == 'cuda' }}
+        shell: bash
+        run: |
+          docker run --rm -i --entrypoint python "${{ steps.tags.outputs.image }}" - <<'PY'
+          import subprocess
+          import torch
+
+          assert torch.version.cuda == "11.8", torch.version.cuda
+          assert torch.cuda.is_available() is False
+
+          libgomp = subprocess.run(
+              ["ldconfig", "-p"],
+              check=True,
+              text=True,
+              stdout=subprocess.PIPE,
+          ).stdout
+          assert "libgomp.so.1" in libgomp
+
+          print("CUDA contract ok")
+          PY
+
+      - name: Export image tarball
+        run: |
           docker save "${{ steps.tags.outputs.image }}" | gzip -1 > "${{ steps.tags.outputs.artifact_name }}.tar.gz"
 
       - name: Upload image artifact

@@ -19,6 +19,7 @@ RUN apt-get update --yes \
         git \
         libglib2.0-0 \
         libgl1 \
+        libgomp1 \
         libsm6 \
         libvulkan1 \
         libxext6 \

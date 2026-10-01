@@ -7,6 +7,20 @@ on:
         description: Docker image to run
         required: true
         default: gho1920/manga-image-translator:linux-cpu
+      start_instance:
+        description: Start internal translator instance
+        required: true
+        type: boolean
+        default: false
+      gpu_mode:
+        description: Translator device mode, used when start_instance is enabled
+        required: true
+        type: choice
+        options:
+          - cpu
+          - gpu
+          - gpu-limited
+        default: cpu
 
 jobs:
   smoke:
@@ -19,15 +33,39 @@ jobs:
         run: docker pull "${{ inputs.image }}"
 
       - name: Start server
+        shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/codex" "$RUNNER_TEMP/result"
+          DOCKER_GPU_ARGS=()
+          SERVER_ARGS=(server/main.py --host=0.0.0.0 --port=8000)
+          if [ "${{ inputs.start_instance }}" = "true" ]; then
+            SERVER_ARGS+=(--start-instance)
+            case "${{ inputs.gpu_mode }}" in
+              gpu)
+                DOCKER_GPU_ARGS+=(--gpus all)
+                SERVER_ARGS+=(--use-gpu)
+                ;;
+              gpu-limited)
+                DOCKER_GPU_ARGS+=(--gpus all)
+                SERVER_ARGS+=(--use-gpu-limited)
+                ;;
+              cpu)
+                ;;
+              *)
+                echo "Unknown gpu_mode: ${{ inputs.gpu_mode }}" >&2
+                exit 1
+                ;;
+            esac
+          fi
+          printf '%q ' python "${SERVER_ARGS[@]}" > "$RUNNER_TEMP/mit-command.txt"
           docker run -d --name mit-smoke \
             -p 8000:8000 \
             -v "$RUNNER_TEMP/codex:/root/.codex" \
             -v "$RUNNER_TEMP/result:/app/result" \
+            "${DOCKER_GPU_ARGS[@]}" \
             --entrypoint python \
             "${{ inputs.image }}" \
-            server/main.py --host=0.0.0.0 --port=8000
+            "${SERVER_ARGS[@]}"
 
       - name: Wait for server
         run: |
@@ -69,5 +107,6 @@ jobs:
             /tmp/codex-auth-status.json
             /tmp/mit-container.log
             /tmp/mit-docker-ps.txt
+            ${{ runner.temp }}/mit-command.txt
           if-no-files-found: warn
           retention-days: 7
