@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      1.0.14
+// @version      1.0.15
 // @description  Collect manga images, submit translations, and provide context-menu translation/TTS helpers.
 // @match        *://*/*
 // @run-at       document-start
@@ -183,13 +183,68 @@
       location.reload();
     });
     GM_registerMenuCommand("Manga Translator: 管理启用域名", () => {
-      const current = readEnabledHosts().join(", ");
-      const next = window.prompt("输入启用域名，逗号分隔；支持 *.example.com；留空表示不启用任何域名：", current);
-      if (next === null) return;
-      writeEnabledHosts(normalizeEnabledHosts(next.split(",")));
-      window.alert("Manga Translator 启用域名已更新，刷新页面后生效。");
-      location.reload();
+      openEnabledHostsEditor("Manga Translator", readEnabledHosts(), (hosts) => {
+        writeEnabledHosts(hosts);
+        window.alert("Manga Translator 启用域名已更新，刷新页面后生效。");
+        location.reload();
+      });
     });
+  }
+
+  function openEnabledHostsEditor(label, hosts, onSave) {
+    const overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:rgba(15,23,42,.38);display:grid;place-items:center;padding:18px;";
+
+    const dialog = document.createElement("div");
+    dialog.style.cssText = "width:min(720px,calc(100vw - 36px));background:#fff;color:#111827;border:1px solid rgba(0,0,0,.16);border-radius:10px;box-shadow:0 24px 80px rgba(0,0,0,.28);font:14px/1.45 -apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;";
+
+    const title = document.createElement("div");
+    title.textContent = `${label} 启用域名`;
+    title.style.cssText = "padding:14px 16px 8px;font-weight:700;";
+
+    const hint = document.createElement("div");
+    hint.textContent = "每行一个域名，支持 *.example.com；留空表示不启用任何域名。";
+    hint.style.cssText = "padding:0 16px 10px;color:#6b7280;font-size:12px;";
+
+    const textarea = document.createElement("textarea");
+    textarea.value = normalizeEnabledHosts(hosts).join("\n");
+    textarea.spellcheck = false;
+    textarea.style.cssText = "display:block;width:calc(100% - 32px);height:min(46vh,360px);margin:0 16px;padding:10px;border:1px solid #d1d5db;border-radius:8px;box-sizing:border-box;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;resize:vertical;";
+
+    const actions = document.createElement("div");
+    actions.style.cssText = "display:flex;justify-content:flex-end;gap:8px;padding:12px 16px 16px;";
+
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = "取消";
+
+    const save = document.createElement("button");
+    save.type = "button";
+    save.textContent = "保存";
+
+    [cancel, save].forEach((button) => {
+      button.style.cssText = "padding:7px 12px;border:1px solid #d1d5db;border-radius:7px;background:#fff;color:#111827;cursor:pointer;";
+    });
+    save.style.background = "#2563eb";
+    save.style.borderColor = "#2563eb";
+    save.style.color = "#fff";
+
+    const close = () => overlay.remove();
+    cancel.addEventListener("click", close);
+    save.addEventListener("click", () => {
+      const nextHosts = normalizeEnabledHosts(textarea.value.split(/[\n,]+/));
+      close();
+      onSave(nextHosts);
+    });
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) close();
+    });
+
+    actions.append(cancel, save);
+    dialog.append(title, hint, textarea, actions);
+    overlay.appendChild(dialog);
+    (document.body || document.documentElement).appendChild(overlay);
+    textarea.focus();
   }
 
   function getCurrentHost() {
