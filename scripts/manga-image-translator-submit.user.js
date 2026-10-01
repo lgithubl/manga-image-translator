@@ -1,9 +1,20 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      1.0.12
+// @version      1.0.13
 // @description  Collect manga images, submit translations, and provide context-menu translation/TTS helpers.
-// @match        *://*/*
+// @match        http://www.mangacopy.com/*
+// @match        https://www.mangacopy.com/*
+// @match        http://*.mangacopy.com/*
+// @match        https://*.mangacopy.com/*
+// @match        http://copymanga.tv/*
+// @match        https://copymanga.tv/*
+// @match        http://*.copymanga.tv/*
+// @match        https://*.copymanga.tv/*
+// @match        http://copymanga.org/*
+// @match        https://copymanga.org/*
+// @match        http://*.copymanga.org/*
+// @match        https://*.copymanga.org/*
 // @run-at       document-start
 // @noframes
 // @grant        GM_xmlhttpRequest
@@ -11,7 +22,6 @@
 // @grant        GM_addStyle
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
 // @connect      *
 // ==/UserScript==
@@ -64,7 +74,6 @@
     panelLeft: null,
     panelTop: null,
     popupBlockHosts: {},
-    enabledHosts: [],
     assistant: {
       textTranslatePath: "http://127.0.0.1:5003/v1/chat/completions",
       ttsPath: "http://127.0.0.1:5003/assistant/tts",
@@ -100,12 +109,6 @@
   let contextMenuShownAt = 0;
   let contextMenuStickyUntil = 0;
 
-  registerHostToggleMenu();
-  if (!isCurrentHostEnabled()) {
-    console.info(`[Manga Image Translator Submitter] disabled on ${location.hostname || location.href}`);
-    return;
-  }
-
   installEarlyPanelShield();
   installExternalContextMenuBridge();
 
@@ -132,7 +135,6 @@
         queue: Array.isArray(local.queue) ? local.queue : [],
         resultsCount: local.resultsCount || 0,
         lastMessage: local.lastMessage || "",
-        enabledHosts: normalizeEnabledHosts(global.enabledHosts),
         assistant: loadedAssistant,
       };
     } catch (_) {
@@ -159,7 +161,6 @@
       panelLeft: state.panelLeft,
       panelTop: state.panelTop,
       popupBlockHosts: state.popupBlockHosts || {},
-      enabledHosts: normalizeEnabledHosts(state.enabledHosts),
       assistant: {
         ...state.assistant,
         history: (state.assistant?.history || []).slice(-100),
@@ -167,63 +168,6 @@
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(localPersisted));
     writeGlobalState(globalPersisted);
-  }
-
-  function registerHostToggleMenu() {
-    const host = getCurrentHost();
-    const enabled = isCurrentHostEnabled();
-    GM_registerMenuCommand(`Manga Translator: ${enabled ? "禁用" : "启用"}当前域名 (${host || "当前页面"})`, () => {
-      setCurrentHostEnabled(!enabled);
-      window.alert(`Manga Translator 已${enabled ? "禁用" : "启用"}当前域名，刷新页面后生效。`);
-      location.reload();
-    });
-    GM_registerMenuCommand("Manga Translator: 管理启用域名", () => {
-      const current = normalizeEnabledHosts(state.enabledHosts).join(", ");
-      const next = window.prompt("输入启用域名，逗号分隔；支持 *.example.com；留空表示不启用任何域名：", current);
-      if (next === null) return;
-      state.enabledHosts = normalizeEnabledHosts(next.split(","));
-      saveState();
-      window.alert("Manga Translator 启用域名已更新，刷新页面后生效。");
-      location.reload();
-    });
-  }
-
-  function getCurrentHost() {
-    return String(location.hostname || "").toLowerCase();
-  }
-
-  function isCurrentHostEnabled() {
-    return isHostEnabled(getCurrentHost(), state.enabledHosts);
-  }
-
-  function setCurrentHostEnabled(enabled) {
-    const host = getCurrentHost();
-    if (!host) return;
-    const hosts = normalizeEnabledHosts(state.enabledHosts).filter((item) => item !== host);
-    if (enabled) hosts.push(host);
-    state.enabledHosts = hosts;
-    saveState();
-  }
-
-  function isHostEnabled(host, enabledHosts) {
-    const value = String(host || "").toLowerCase();
-    if (!value) return false;
-    return normalizeEnabledHosts(enabledHosts).some((item) => {
-      if (item === "*") return true;
-      if (item.startsWith("*.")) {
-        const domain = item.slice(2);
-        return value === domain || value.endsWith(`.${domain}`);
-      }
-      return value === item;
-    });
-  }
-
-  function normalizeEnabledHosts(value) {
-    const source = Array.isArray(value) ? value : String(value || "").split(",");
-    return Array.from(new Set(source
-      .map((item) => String(item || "").trim().toLowerCase())
-      .map((item) => item.replace(/^https?:\/\//, "").replace(/\/.*$/, ""))
-      .filter(Boolean)));
   }
 
   function readGlobalState() {
