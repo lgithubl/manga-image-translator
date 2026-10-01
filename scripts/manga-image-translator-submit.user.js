@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      1.0.15
+// @version      1.0.16
 // @description  Collect manga images, submit translations, and provide context-menu translation/TTS helpers.
 // @match        *://*/*
 // @run-at       document-start
@@ -1648,6 +1648,10 @@
     const rect = target?.getBoundingClientRect();
     const width = rect?.width || 56;
     const height = rect?.height || 40;
+    return clampPosition(left, top, width, height);
+  }
+
+  function clampPosition(left, top, width, height) {
     const margin = 8;
     return {
       left: Math.min(Math.max(margin, left), Math.max(margin, window.innerWidth - width - margin)),
@@ -1655,10 +1659,29 @@
     };
   }
 
+  function getExpandedPanelPosition() {
+    const panelRect = panelFrame?.getBoundingClientRect();
+    const panelWidth = panelRect?.width || 320;
+    const panelHeight = panelRect?.height || 560;
+    const defaultRight = window.innerWidth - 16;
+    const defaultTop = 72;
+    const miniRect = miniToggle?.getBoundingClientRect();
+    const anchorRight = Number.isFinite(state.panelLeft)
+      ? state.panelLeft + (miniRect?.width || 56)
+      : defaultRight;
+    const anchorTop = Number.isFinite(state.panelTop) ? state.panelTop : defaultTop;
+    return clampPosition(anchorRight - panelWidth, anchorTop, panelWidth, panelHeight);
+  }
+
   function applyPanelPosition() {
     const target = state.collapsed && miniToggle ? miniToggle : panelFrame || root;
     if (!target) return;
-    if (Number.isFinite(state.panelLeft) && Number.isFinite(state.panelTop)) {
+    if (!state.collapsed && target === panelFrame) {
+      const pos = getExpandedPanelPosition();
+      target.style.left = `${pos.left}px`;
+      target.style.top = `${pos.top}px`;
+      target.style.right = "auto";
+    } else if (Number.isFinite(state.panelLeft) && Number.isFinite(state.panelTop)) {
       const pos = clampPanelPosition(state.panelLeft, state.panelTop);
       state.panelLeft = pos.left;
       state.panelTop = pos.top;
