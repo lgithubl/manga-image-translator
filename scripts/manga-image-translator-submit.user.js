@@ -1,20 +1,9 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      1.0.13
+// @version      1.0.14
 // @description  Collect manga images, submit translations, and provide context-menu translation/TTS helpers.
-// @match        http://www.mangacopy.com/*
-// @match        https://www.mangacopy.com/*
-// @match        http://*.mangacopy.com/*
-// @match        https://*.mangacopy.com/*
-// @match        http://copymanga.tv/*
-// @match        https://copymanga.tv/*
-// @match        http://*.copymanga.tv/*
-// @match        https://*.copymanga.tv/*
-// @match        http://copymanga.org/*
-// @match        https://copymanga.org/*
-// @match        http://*.copymanga.org/*
-// @match        https://*.copymanga.org/*
+// @match        *://*/*
 // @run-at       document-start
 // @noframes
 // @grant        GM_xmlhttpRequest
@@ -22,6 +11,7 @@
 // @grant        GM_addStyle
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
 // @connect      *
 // ==/UserScript==
@@ -34,6 +24,14 @@
   const STORAGE_KEY = "mit_submitter_state_v1";
   const GLOBAL_STORAGE_KEY = "mit_submitter_global_state_v1";
   const IMAGE_EXTENSIONS = /\.(avif|bmp|gif|jpe?g|png|webp)(\?|#|$)/i;
+  const DEFAULT_ENABLED_HOSTS = [
+    "www.mangacopy.com",
+    "*.mangacopy.com",
+    "copymanga.tv",
+    "*.copymanga.tv",
+    "copymanga.org",
+    "*.copymanga.org",
+  ];
   const DEFAULT_CONFIG = {
     detector: {
       detector: "default",
@@ -74,6 +72,7 @@
     panelLeft: null,
     panelTop: null,
     popupBlockHosts: {},
+    enabledHosts: DEFAULT_ENABLED_HOSTS,
     assistant: {
       textTranslatePath: "http://127.0.0.1:5003/v1/chat/completions",
       ttsPath: "http://127.0.0.1:5003/assistant/tts",
@@ -90,6 +89,9 @@
       history: [],
     },
   };
+
+  registerHostToggleMenu();
+  if (!isCurrentHostEnabled()) return;
 
   let state = loadState();
   let running = false;
@@ -135,6 +137,7 @@
         queue: Array.isArray(local.queue) ? local.queue : [],
         resultsCount: local.resultsCount || 0,
         lastMessage: local.lastMessage || "",
+        enabledHosts: normalizeEnabledHosts(global.enabledHosts),
         assistant: loadedAssistant,
       };
     } catch (_) {
@@ -161,6 +164,7 @@
       panelLeft: state.panelLeft,
       panelTop: state.panelTop,
       popupBlockHosts: state.popupBlockHosts || {},
+      enabledHosts: normalizeEnabledHosts(state.enabledHosts),
       assistant: {
         ...state.assistant,
         history: (state.assistant?.history || []).slice(-100),
@@ -168,6 +172,76 @@
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(localPersisted));
     writeGlobalState(globalPersisted);
+  }
+
+  function registerHostToggleMenu() {
+    const host = getCurrentHost();
+    const enabled = isCurrentHostEnabled();
+    GM_registerMenuCommand(`Manga Translator: ${enabled ? "禁用" : "启用"}当前域名 (${host || "当前页面"})`, () => {
+      setCurrentHostEnabled(!enabled);
+      window.alert(`Manga Translator 已${enabled ? "禁用" : "启用"}当前域名，刷新页面后生效。`);
+      location.reload();
+    });
+    GM_registerMenuCommand("Manga Translator: 管理启用域名", () => {
+      const current = readEnabledHosts().join(", ");
+      const next = window.prompt("输入启用域名，逗号分隔；支持 *.example.com；留空表示不启用任何域名：", current);
+      if (next === null) return;
+      writeEnabledHosts(normalizeEnabledHosts(next.split(",")));
+      window.alert("Manga Translator 启用域名已更新，刷新页面后生效。");
+      location.reload();
+    });
+  }
+
+  function getCurrentHost() {
+    return String(location.hostname || "").toLowerCase();
+  }
+
+  function isCurrentHostEnabled() {
+    return isHostEnabled(getCurrentHost(), readEnabledHosts());
+  }
+
+  function setCurrentHostEnabled(enabled) {
+    const host = getCurrentHost();
+    if (!host) return;
+    const hosts = readEnabledHosts().filter((item) => item !== host);
+    if (enabled) hosts.push(host);
+    writeEnabledHosts(hosts);
+  }
+
+  function readEnabledHosts() {
+    const global = readGlobalState() || {};
+    return normalizeEnabledHosts(Object.prototype.hasOwnProperty.call(global, "enabledHosts")
+      ? global.enabledHosts
+      : DEFAULT_ENABLED_HOSTS);
+  }
+
+  function writeEnabledHosts(enabledHosts) {
+    const global = readGlobalState() || {};
+    writeGlobalState({
+      ...(global && typeof global === "object" ? global : {}),
+      enabledHosts: normalizeEnabledHosts(enabledHosts),
+    });
+  }
+
+  function isHostEnabled(host, enabledHosts) {
+    const value = String(host || "").toLowerCase();
+    if (!value) return false;
+    return normalizeEnabledHosts(enabledHosts).some((item) => {
+      if (item === "*") return true;
+      if (item.startsWith("*.")) {
+        const domain = item.slice(2);
+        return value === domain || value.endsWith(`.${domain}`);
+      }
+      return value === item;
+    });
+  }
+
+  function normalizeEnabledHosts(value) {
+    const source = Array.isArray(value) ? value : String(value || "").split(",");
+    return Array.from(new Set(source
+      .map((item) => String(item || "").trim().toLowerCase())
+      .map((item) => item.replace(/^https?:\/\//, "").replace(/\/.*$/, ""))
+      .filter(Boolean)));
   }
 
   function readGlobalState() {
