@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Manga Image Translator Submitter
 // @namespace    https://github.com/lgithubl/manga-image-translator
-// @version      1.0.16
+// @version      1.0.17
 // @description  Collect manga images, submit translations, and provide context-menu translation/TTS helpers.
 // @match        *://*/*
 // @run-at       document-start
@@ -464,23 +464,25 @@
 
   function detectImages() {
     const found = [];
+    const seen = new Set();
     for (const img of Array.from(document.images)) {
       const url = imageUrlFromElement(img);
-      if (isLikelyMangaImage(img, url)) {
-        found.push(url);
+      if (isLikelyMangaImage(img, url) && !seen.has(url)) {
+        found.push({ url, img });
+        seen.add(url);
       }
     }
-    return Array.from(new Set(found));
+    return found;
   }
 
   function addDetectedImages() {
-    const urls = detectImages();
+    const images = detectImages();
     const known = new Set(state.queue.map((item) => item.url));
     let added = 0;
     let skipped = 0;
-    for (const url of urls) {
+    for (const { url, img } of images) {
       if (known.has(url)) continue;
-      if (isBlacklistedImageUrl(url)) {
+      if (isBlacklistedImage(url, img)) {
         skipped += 1;
         continue;
       }
@@ -497,7 +499,7 @@
     }
     saveState();
     render();
-    setMessage(`检测到 ${urls.length} 张图，新增 ${added} 张，黑名单跳过 ${skipped} 张。`);
+    setMessage(`检测到 ${images.length} 张图，新增 ${added} 张，黑名单跳过 ${skipped} 张。`);
   }
 
   function gmRequest(options) {
@@ -1164,17 +1166,51 @@
     return `image-${String(fallbackIndex).padStart(3, "0")}.jpg`;
   }
 
-  function blacklistNames() {
+  function blacklistRules() {
     return String(state.imageBlacklist || "")
-      .split(",")
-      .map((name) => name.trim().toLowerCase())
+      .split(/[\n,]+/)
+      .map((name) => name.trim())
       .filter(Boolean);
   }
 
-  function isBlacklistedImageUrl(url) {
+  function isBlacklistedImage(url, img = null) {
     const name = fileNameFromUrl(url, 1).toLowerCase();
     const stem = name.replace(/\.[^.]+$/, "");
-    return blacklistNames().some((blocked) => blocked === name || blocked === stem);
+    const href = String(url || "");
+    const hrefLower = href.toLowerCase();
+    return blacklistRules().some((rule) => {
+      const lower = rule.toLowerCase();
+      if (lower.startsWith("selector:")) {
+        return matchesImageSelector(img, rule.slice("selector:".length).trim());
+      }
+      if (lower.startsWith("url:")) {
+        return hrefLower.includes(rule.slice("url:".length).trim().toLowerCase());
+      }
+      if (lower.startsWith("re:")) {
+        return matchesImageUrlRegex(href, rule.slice("re:".length).trim());
+      }
+      return lower === name || lower === stem;
+    });
+  }
+
+  function matchesImageSelector(img, selector) {
+    if (!img || !selector) return false;
+    try {
+      return img.matches(selector);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function matchesImageUrlRegex(url, pattern) {
+    if (!pattern) return false;
+    try {
+      const match = pattern.match(/^\/(.+)\/([a-z]*)$/i);
+      const regex = match ? new RegExp(match[1], match[2]) : new RegExp(pattern, "i");
+      return regex.test(url);
+    } catch (_) {
+      return false;
+    }
   }
 
   function updateQueueItem(id, patch) {
@@ -1832,7 +1868,7 @@
               <label>ZIP name <input data-field="zipName" value="${escapeAttr(state.zipName)}"></label>
               <button data-action="refreshZipName" type="button">刷新</button>
             </div>
-            <label>Image blacklist <input data-field="imageBlacklist" value="${escapeAttr(state.imageBlacklist)}" placeholder="abc123.webp, cover.jpg"></label>
+            <label>Image blacklist <input data-field="imageBlacklist" value="${escapeAttr(state.imageBlacklist)}" placeholder="cover.jpg, selector:.quick-thumbnail img, url:/thumbnail, re:/thumbnail\\?page=\\d+/"></label>
           `)}
           ${renderSection("all", "ALL 维度", `
             <label class="mit-check"><input data-field="useBasicAuth" type="checkbox" ${state.useBasicAuth ? "checked" : ""}> Basic Auth</label>
